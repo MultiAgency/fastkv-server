@@ -19,6 +19,9 @@ pub struct FastfsRow {
     pub block_timestamp: i64,
     pub mime_type: Option<String>,
     pub content: Option<Vec<u8>>,
+    pub offset: i32,
+    pub full_size: i32,
+    pub nonce: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,9 @@ pub struct FastfsParsedRow {
     pub block_timestamp: u64,
     pub mime_type: Option<String>,
     pub content: Option<Vec<u8>>,
+    pub offset: u32,
+    pub full_size: u32,
+    pub nonce: u32,
 }
 
 impl From<FastfsRow> for FastfsParsedRow {
@@ -40,6 +46,9 @@ impl From<FastfsRow> for FastfsParsedRow {
             block_timestamp: row.block_timestamp as u64,
             mime_type: row.mime_type,
             content: row.content,
+            offset: row.offset as u32,
+            full_size: row.full_size as u32,
+            nonce: row.nonce as u32,
         }
     }
 }
@@ -117,7 +126,7 @@ impl ScyllaDb {
         Ok(Self {
             select_fastfs: Self::prepare_query(
                 &scylla_session,
-                "SELECT receipt_id, tx_hash, block_height, block_timestamp, mime_type, content FROM s_fastfs WHERE predecessor_id = ? AND current_account_id = ? AND relative_path = ? LIMIT 1",
+                "SELECT receipt_id, tx_hash, block_height, block_timestamp, mime_type, content, offset, full_size, nonce FROM s_fastfs_v2 WHERE predecessor_id = ? AND current_account_id = ? AND relative_path = ? LIMIT 32",
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
             scylla_session,
@@ -139,7 +148,7 @@ impl ScyllaDb {
         predecessor_id: &str,
         current_account_id: &str,
         relative_path: &str,
-    ) -> anyhow::Result<Option<FastfsParsedRow>> {
+    ) -> anyhow::Result<Vec<FastfsParsedRow>> {
         let rows = self
             .scylla_session
             .execute_unpaged(
@@ -152,6 +161,9 @@ impl ScyllaDb {
             )
             .await?
             .into_rows_result()?;
-        Ok(rows.single_row::<FastfsRow>().ok().map(|v| v.into()))
+
+        rows.rows::<FastfsRow>()?
+            .map(|row_result| Ok(FastfsParsedRow::from(row_result?)))
+            .collect()
     }
 }

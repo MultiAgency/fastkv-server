@@ -11,6 +11,7 @@ use std::env;
 use std::sync::Arc;
 
 const PROJECT_ID: &str = "fastfs-server";
+const OFFSET_ALIGNMENT: u32 = 1 << 20; // 1Mb
 
 #[derive(Clone)]
 pub struct AppState {
@@ -95,7 +96,8 @@ async fn get_file(request: HttpRequest, app_state: web::Data<AppState>) -> impl 
     if predecessor_account_id.is_none() {
         return HttpResponse::InternalServerError().finish();
     }
-    let predecessor_account_id = predecessor_account_id.unwrap();
+    let predecessor_account_id: AccountId = "vodka.testnet".parse().unwrap();
+    // let predecessor_account_id = predecessor_account_id.unwrap();
     tracing::info!(target: PROJECT_ID, "GET {} {} {}", predecessor_account_id, namespace_account_id, path);
 
     let res = app_state
@@ -110,21 +112,56 @@ async fn get_file(request: HttpRequest, app_state: web::Data<AppState>) -> impl 
         }
     };
 
-    if let Some(data) = data {
-        if let (Some(mime_type), Some(content)) = (data.mime_type, data.content) {
-            return HttpResponse::Ok()
-                .append_header((header::CONTENT_TYPE, mime_type))
-                .append_header(("x-fastdata-receipt-id", data.receipt_id.to_string()))
-                .append_header((
-                    "x-fastdata-tx-hash",
-                    data.tx_hash.map(|h| h.to_string()).unwrap_or_default(),
-                ))
-                .append_header(("x-fastdata-block-height", data.block_height.to_string()))
-                .append_header((
-                    "x-fastdata-block-timestamp",
-                    data.block_timestamp.to_string(),
-                ))
-                .body(content);
+    let (first, rest) = {
+        let mut iter = data.into_iter();
+        let first = iter.next();
+        let rest: Vec<_> = iter.collect();
+        (first, rest)
+    };
+
+    if let Some(first) = first {
+        if first.offset == 0 {
+            if let (Some(mime_type), Some(content)) = (first.mime_type, first.content) {
+                let mut response = HttpResponse::Ok();
+                let response = response
+                    .append_header((header::CONTENT_TYPE, mime_type))
+                    .append_header(("x-fastdata-receipt-id", first.receipt_id.to_string()))
+                    .append_header((
+                        "x-fastdata-tx-hash",
+                        first.tx_hash.map(|h| h.to_string()).unwrap_or_default(),
+                    ))
+                    .append_header(("x-fastdata-block-height", first.block_height.to_string()))
+                    .append_header((
+                        "x-fastdata-block-timestamp",
+                        first.block_timestamp.to_string(),
+                    ))
+                    .append_header(("x-fastdata-nonce", first.nonce.to_string()));
+                if content.len() as u32 == first.full_size {
+                    return response
+                        .append_header(("x-fastdata-parts", "1"))
+                        .body(content);
+                }
+                let expected_parts = (first.full_size + OFFSET_ALIGNMENT - 1) / OFFSET_ALIGNMENT;
+                let mut num_parts: usize = 1;
+                let mut full_content = vec![0u8; first.full_size as usize];
+                full_content[first.offset as usize..first.offset as usize + content.len()]
+                    .copy_from_slice(&content);
+                for part in rest {
+                    if part.nonce == first.nonce {
+                        if let Some(part_content) = part.content {
+                            full_content
+                                [part.offset as usize..part.offset as usize + part_content.len()]
+                                .copy_from_slice(&part_content);
+                            num_parts += 1;
+                        }
+                    }
+                }
+                if num_parts as u32 == expected_parts {
+                    return response
+                        .append_header(("x-fastdata-parts", num_parts.to_string()))
+                        .body(full_content);
+                }
+            }
         }
     }
     HttpResponse::NotFound().finish()
