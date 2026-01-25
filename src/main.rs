@@ -96,8 +96,7 @@ async fn get_file(request: HttpRequest, app_state: web::Data<AppState>) -> impl 
     if predecessor_account_id.is_none() {
         return HttpResponse::InternalServerError().finish();
     }
-    let predecessor_account_id: AccountId = "vodka.testnet".parse().unwrap();
-    // let predecessor_account_id = predecessor_account_id.unwrap();
+    let predecessor_account_id = predecessor_account_id.unwrap();
     tracing::info!(target: PROJECT_ID, "GET {} {} {}", predecessor_account_id, namespace_account_id, path);
 
     let res = app_state
