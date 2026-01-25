@@ -149,6 +149,9 @@ async fn get_file(request: HttpRequest, app_state: web::Data<AppState>) -> impl 
                 for part in rest {
                     if part.nonce == first.nonce {
                         if let Some(part_content) = part.content {
+                            if part.offset >= first.full_size {
+                                break;
+                            }
                             let right_bound = std::cmp::min(
                                 full_content.len(),
                                 part.offset as usize + part_content.len(),
