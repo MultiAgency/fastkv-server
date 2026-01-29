@@ -2,59 +2,19 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 
-use fastnear_primitives::near_indexer_primitives::types::BlockHeight;
-use fastnear_primitives::near_indexer_primitives::CryptoHash;
+use crate::models::{KvEntry, KvRow, QueryParams, ReverseParams};
+use crate::queries::build_prefix_query;
 use fastnear_primitives::types::ChainId;
 use rustls::pki_types::pem::PemObject;
 use rustls::{ClientConfig, RootCertStore};
-use scylla::DeserializeRow;
+use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 
-#[derive(DeserializeRow)]
-pub struct FastfsRow {
-    pub receipt_id: String,
-    pub tx_hash: Option<String>,
-    pub block_height: i64,
-    pub block_timestamp: i64,
-    pub mime_type: Option<String>,
-    pub content: Option<Vec<u8>>,
-    pub offset: i32,
-    pub full_size: i32,
-    pub nonce: i32,
-}
-
-#[derive(Debug, Clone)]
-pub struct FastfsParsedRow {
-    pub receipt_id: CryptoHash,
-    pub tx_hash: Option<CryptoHash>,
-    pub block_height: BlockHeight,
-    pub block_timestamp: u64,
-    pub mime_type: Option<String>,
-    pub content: Option<Vec<u8>>,
-    pub offset: u32,
-    pub full_size: u32,
-    pub nonce: u32,
-}
-
-impl From<FastfsRow> for FastfsParsedRow {
-    fn from(row: FastfsRow) -> Self {
-        Self {
-            receipt_id: row.receipt_id.parse().unwrap(),
-            tx_hash: row.tx_hash.map(|h| h.parse().unwrap()),
-            block_height: row.block_height as u64,
-            block_timestamp: row.block_timestamp as u64,
-            mime_type: row.mime_type,
-            content: row.content,
-            offset: row.offset as u32,
-            full_size: row.full_size as u32,
-            nonce: row.nonce as u32,
-        }
-    }
-}
-
 pub struct ScyllaDb {
-    select_fastfs: PreparedStatement,
+    get_kv: PreparedStatement,
+    query_kv_no_prefix: PreparedStatement,
+    reverse_kv: PreparedStatement,
 
     pub scylla_session: Session,
 }
@@ -65,27 +25,31 @@ pub fn create_rustls_client_config() -> Arc<ClientConfig> {
             .install_default()
             .expect("Failed to install default provider");
     }
-    let ca_cert_path =
-        env::var("SCYLLA_SSL_CA").expect("SCYLLA_SSL_CA environment variable not set");
-    let client_cert_path =
-        env::var("SCYLLA_SSL_CERT").expect("SCYLLA_SSL_CERT environment variable not set");
-    let client_key_path =
-        env::var("SCYLLA_SSL_KEY").expect("SCYLLA_SSL_KEY environment variable not set");
 
+    let ca_cert_path = env::var("SCYLLA_SSL_CA").expect("SCYLLA_SSL_CA required for TLS");
     let ca_certs = rustls::pki_types::CertificateDer::from_pem_file(ca_cert_path)
         .expect("Failed to load CA certs");
-    let client_certs = rustls::pki_types::CertificateDer::from_pem_file(client_cert_path)
-        .expect("Failed to load client certs");
-    let client_key = rustls::pki_types::PrivateKeyDer::from_pem_file(client_key_path)
-        .expect("Failed to load client key");
 
     let mut root_store = RootCertStore::empty();
     root_store.add(ca_certs).expect("Failed to add CA certs");
 
-    let config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_client_auth_cert(vec![client_certs], client_key)
-        .expect("Failed to create client config");
+    let config = match (env::var("SCYLLA_SSL_CERT").ok(), env::var("SCYLLA_SSL_KEY").ok()) {
+        (Some(cert_path), Some(key_path)) => {
+            let client_certs = rustls::pki_types::CertificateDer::from_pem_file(cert_path)
+                .expect("Failed to load client certs");
+            let client_key = rustls::pki_types::PrivateKeyDer::from_pem_file(key_path)
+                .expect("Failed to load client key");
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(vec![client_certs], client_key)
+                .expect("Failed to create client config with mTLS")
+        }
+        _ => {
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        }
+    };
 
     Arc::new(config)
 }
@@ -96,9 +60,11 @@ impl ScyllaDb {
         let scylla_username = env::var("SCYLLA_USERNAME").expect("SCYLLA_USERNAME must be set");
         let scylla_password = env::var("SCYLLA_PASSWORD").expect("SCYLLA_PASSWORD must be set");
 
+        let tls_config = env::var("SCYLLA_SSL_CA").ok().map(|_| create_rustls_client_config());
+
         let session: Session = SessionBuilder::new()
             .known_node(scylla_url)
-            .tls_context(Some(create_rustls_client_config()))
+            .tls_context(tls_config)
             .authenticator_provider(Arc::new(
                 scylla::authentication::PlainTextAuthenticator::new(
                     scylla_username,
@@ -124,9 +90,19 @@ impl ScyllaDb {
             .await?;
 
         Ok(Self {
-            select_fastfs: Self::prepare_query(
+            get_kv: Self::prepare_query(
                 &scylla_session,
-                "SELECT receipt_id, tx_hash, block_height, block_timestamp, mime_type, content, offset, full_size, nonce FROM s_fastfs_v2 WHERE predecessor_id = ? AND current_account_id = ? AND relative_path = ? LIMIT 32",
+                "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM s_kv_last WHERE predecessor_id = ? AND current_account_id = ? AND key = ?",
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            query_kv_no_prefix: Self::prepare_query(
+                &scylla_session,
+                "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM s_kv_last WHERE predecessor_id = ? AND current_account_id = ?",
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            reverse_kv: Self::prepare_query(
+                &scylla_session,
+                "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM mv_kv_cur_key WHERE current_account_id = ? AND key = ?",
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
             scylla_session,
@@ -143,27 +119,107 @@ impl ScyllaDb {
         Ok(scylla_db_session.prepare(query).await?)
     }
 
-    pub async fn get_fastfs(
+    pub async fn get_kv(
         &self,
         predecessor_id: &str,
         current_account_id: &str,
-        relative_path: &str,
-    ) -> anyhow::Result<Vec<FastfsParsedRow>> {
-        let rows = self
+        key: &str,
+    ) -> anyhow::Result<Option<KvEntry>> {
+        let result = self
             .scylla_session
             .execute_unpaged(
-                &self.select_fastfs,
-                (
-                    predecessor_id.to_string(),
-                    current_account_id.to_string(),
-                    relative_path.to_string(),
-                ),
+                &self.get_kv,
+                (predecessor_id, current_account_id, key),
             )
             .await?
             .into_rows_result()?;
 
-        rows.rows::<FastfsRow>()?
-            .map(|row_result| Ok(FastfsParsedRow::from(row_result?)))
-            .collect()
+        let entry = result
+            .rows::<KvRow>()?
+            .next()
+            .transpose()?
+            .map(KvEntry::from);
+
+        Ok(entry)
+    }
+
+    pub async fn query_kv_with_pagination(
+        &self,
+        params: &QueryParams,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let rows = if let Some(prefix) = &params.key_prefix {
+            // Dynamic query with prefix range
+            let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix);
+            self.scylla_session
+                .query_unpaged(
+                    stmt,
+                    (
+                        &params.predecessor_id,
+                        &params.current_account_id,
+                        &prefix_start,
+                        &prefix_end,
+                    ),
+                )
+                .await?
+                .into_rows_result()?
+        } else {
+            // Prepared query without prefix
+            self.scylla_session
+                .execute_unpaged(
+                    &self.query_kv_no_prefix,
+                    (&params.predecessor_id, &params.current_account_id),
+                )
+                .await?
+                .into_rows_result()?
+        };
+
+        let entries: Vec<KvEntry> = rows
+            .rows::<KvRow>()?
+            .filter_map(|row_result| row_result.ok())
+            .map(KvEntry::from)
+            .filter(|entry| {
+                // Apply exclude_null filter
+                !params.exclude_null.unwrap_or(false) || entry.value != "null"
+            })
+            .skip(params.offset)
+            .take(params.limit)
+            .collect();
+
+        Ok(entries)
+    }
+
+    pub async fn reverse_kv_with_dedup(
+        &self,
+        params: &ReverseParams,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let rows = self
+            .scylla_session
+            .execute_unpaged(&self.reverse_kv, (&params.current_account_id, &params.key))
+            .await?
+            .into_rows_result()?;
+
+        let mut seen_predecessors = HashSet::new();
+        let entries: Vec<KvEntry> = rows
+            .rows::<KvRow>()?
+            .filter_map(|row_result| row_result.ok())
+            .map(KvEntry::from)
+            .filter(|entry| {
+                // Deduplicate by predecessor_id (keep first = most recent)
+                if seen_predecessors.contains(&entry.predecessor_id) {
+                    false
+                } else {
+                    seen_predecessors.insert(entry.predecessor_id.clone());
+                    true
+                }
+            })
+            .filter(|entry| {
+                // Apply exclude_null filter
+                !params.exclude_null.unwrap_or(false) || entry.value != "null"
+            })
+            .skip(params.offset)
+            .take(params.limit)
+            .collect();
+
+        Ok(entries)
     }
 }

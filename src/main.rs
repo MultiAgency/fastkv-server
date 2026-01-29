@@ -1,21 +1,22 @@
+mod handlers;
+mod models;
+mod queries;
 mod scylladb;
 
+use crate::handlers::{get_kv_handler, health_check, query_kv_handler, reverse_kv_handler};
 use crate::scylladb::ScyllaDb;
 use actix_cors::Cors;
 use actix_web::http::header;
-use actix_web::{get, middleware, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::{middleware, web, App, HttpServer};
 use dotenv::dotenv;
-use fastnear_primitives::near_indexer_primitives::types::AccountId;
 use fastnear_primitives::types::ChainId;
 use std::env;
 use std::sync::Arc;
 
-const PROJECT_ID: &str = "fastfs-server";
-const OFFSET_ALIGNMENT: u32 = 1 << 20; // 1Mb
+const PROJECT_ID: &str = "fastkv-server";
 
 #[derive(Clone)]
 pub struct AppState {
-    pub hostname: String,
     pub scylladb: Arc<ScyllaDb>,
 }
 
@@ -24,10 +25,8 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter("scylladb=info,fastfs-server=info")
+        .with_env_filter("scylladb=info,fastkv-server=info")
         .init();
-
-    let hostname = env::var("HOSTNAME").expect("Missing HOSTNAME env var");
 
     let chain_id: ChainId = env::var("CHAIN_ID")
         .expect("CHAIN_ID required")
@@ -65,7 +64,6 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(web::Data::new(AppState {
-                hostname: hostname.clone(),
                 scylladb: Arc::clone(&scylladb),
             }))
             .wrap(cors)
@@ -73,101 +71,14 @@ async fn main() -> std::io::Result<()> {
                 "%{r}a \"%r\"	%s %b \"%{Referer}i\" \"%{User-Agent}i\" %T",
             ))
             .wrap(tracing_actix_web::TracingLogger::default())
-            .service(get_file)
+            .service(health_check)
+            .service(get_kv_handler)
+            .service(query_kv_handler)
+            .service(reverse_kv_handler)
     })
     .bind(format!("127.0.0.1:{}", env::var("PORT").unwrap()))?
     .run()
     .await?;
 
     Ok(())
-}
-
-#[get("/{account_id}/{path:.*}")]
-async fn get_file(request: HttpRequest, app_state: web::Data<AppState>) -> impl Responder {
-    let namespace_account_id = request.match_info().get("account_id").unwrap();
-    let mut path = request.match_info().get("path").unwrap().to_string();
-    if path.is_empty() || path.ends_with('/') {
-        path += "index.html";
-    }
-    let hostname = request.connection_info().host().to_string();
-    let predecessor_account_id: Option<AccountId> = hostname
-        .strip_suffix(&app_state.hostname)
-        .and_then(|s| s.parse().ok());
-    if predecessor_account_id.is_none() {
-        return HttpResponse::InternalServerError().finish();
-    }
-    let predecessor_account_id = predecessor_account_id.unwrap();
-    tracing::info!(target: PROJECT_ID, "GET {} {} {}", predecessor_account_id, namespace_account_id, path);
-
-    let res = app_state
-        .scylladb
-        .get_fastfs(predecessor_account_id.as_str(), namespace_account_id, &path)
-        .await;
-    let data = match res {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::error!(target: PROJECT_ID, "Error getting fastfs data, {}", e);
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
-
-    let (first, rest) = {
-        let mut iter = data.into_iter();
-        let first = iter.next();
-        let rest: Vec<_> = iter.collect();
-        (first, rest)
-    };
-
-    if let Some(first) = first {
-        if first.offset == 0 {
-            if let (Some(mime_type), Some(content)) = (first.mime_type, first.content) {
-                let mut response = HttpResponse::Ok();
-                let response = response
-                    .append_header((header::CONTENT_TYPE, mime_type))
-                    .append_header(("x-fastdata-receipt-id", first.receipt_id.to_string()))
-                    .append_header((
-                        "x-fastdata-tx-hash",
-                        first.tx_hash.map(|h| h.to_string()).unwrap_or_default(),
-                    ))
-                    .append_header(("x-fastdata-block-height", first.block_height.to_string()))
-                    .append_header((
-                        "x-fastdata-block-timestamp",
-                        first.block_timestamp.to_string(),
-                    ))
-                    .append_header(("x-fastdata-nonce", first.nonce.to_string()));
-                if content.len() as u32 == first.full_size {
-                    return response
-                        .append_header(("x-fastdata-parts", "1"))
-                        .body(content);
-                }
-                let expected_parts = (first.full_size + OFFSET_ALIGNMENT - 1) / OFFSET_ALIGNMENT;
-                let mut num_parts: usize = 1;
-                let mut full_content = vec![0u8; first.full_size as usize];
-                full_content[first.offset as usize..first.offset as usize + content.len()]
-                    .copy_from_slice(&content);
-                for part in rest {
-                    if part.nonce == first.nonce {
-                        if let Some(part_content) = part.content {
-                            if part.offset >= first.full_size {
-                                break;
-                            }
-                            let right_bound = std::cmp::min(
-                                full_content.len(),
-                                part.offset as usize + part_content.len(),
-                            );
-                            full_content[part.offset as usize..right_bound]
-                                .copy_from_slice(&part_content);
-                            num_parts += 1;
-                        }
-                    }
-                }
-                if num_parts as u32 == expected_parts {
-                    return response
-                        .append_header(("x-fastdata-parts", num_parts.to_string()))
-                        .body(full_content);
-                }
-            }
-        }
-    }
-    HttpResponse::NotFound().finish()
 }
