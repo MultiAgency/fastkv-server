@@ -11,7 +11,7 @@ fastnear-primitives = "0.1.0"
 tracing = { version = "0.1.13", features = ["log"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-actix-web = "0.7.9"
-scylla = { version = "1.1.0", features = ["rustls-023", "full-serialization"] }
+scylla = { version = "=1.1.0", features = ["rustls-023", "full-serialization"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 anyhow = "1.0.70"
 serde = { version = "1.0", features = ["derive"] }
