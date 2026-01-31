@@ -2,7 +2,7 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 
-use crate::models::{KvEntry, KvRow, QueryParams, ReverseParams};
+use crate::models::{CountParams, HistoryParams, KvEntry, KvHistoryRow, KvRow, QueryParams, ReverseParams};
 use crate::queries::build_prefix_query;
 use fastnear_primitives::types::ChainId;
 use rustls::pki_types::pem::PemObject;
@@ -15,8 +15,12 @@ pub struct ScyllaDb {
     get_kv: PreparedStatement,
     query_kv_no_prefix: PreparedStatement,
     reverse_kv: PreparedStatement,
+    get_kv_history: PreparedStatement,
 
     pub scylla_session: Session,
+    pub table_name: String,
+    pub history_table_name: String,
+    pub reverse_view_name: String,
 }
 
 pub fn create_rustls_client_config() -> Arc<ClientConfig> {
@@ -86,27 +90,50 @@ impl ScyllaDb {
     }
 
     pub async fn new(chain_id: ChainId, scylla_session: Session) -> anyhow::Result<Self> {
+        // Support custom keyspace or use default pattern
+        let keyspace = env::var("KEYSPACE")
+            .unwrap_or_else(|_| format!("fastdata_{chain_id}"));
+
         scylla_session
-            .use_keyspace(format!("fastdata_{chain_id}"), false)
+            .use_keyspace(keyspace, false)
             .await?;
+
+        // Support custom table names
+        let table_name = env::var("TABLE_NAME")
+            .unwrap_or_else(|_| "s_kv_last".to_string());
+        let history_table_name = env::var("HISTORY_TABLE_NAME")
+            .unwrap_or_else(|_| "s_kv".to_string());
+        let reverse_view_name = env::var("REVERSE_VIEW_NAME")
+            .unwrap_or_else(|_| "mv_kv_cur_key".to_string());
+
+        let columns = "predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash";
+        let history_columns = "predecessor_id, current_account_id, key, block_height, order_id, value, block_timestamp, receipt_id, tx_hash, signer_id, shard_id, receipt_index, action_index";
 
         Ok(Self {
             get_kv: Self::prepare_query(
                 &scylla_session,
-                "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM s_kv_last WHERE predecessor_id = ? AND current_account_id = ? AND key = ?",
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key = ?", columns, table_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
             query_kv_no_prefix: Self::prepare_query(
                 &scylla_session,
-                "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM s_kv_last WHERE predecessor_id = ? AND current_account_id = ?",
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ?", columns, table_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
             reverse_kv: Self::prepare_query(
                 &scylla_session,
-                "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM mv_kv_cur_key WHERE current_account_id = ? AND key = ?",
+                &format!("SELECT {} FROM {} WHERE current_account_id = ? AND key = ?", columns, reverse_view_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            get_kv_history: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key = ?", history_columns, history_table_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
             scylla_session,
+            table_name,
+            history_table_name,
+            reverse_view_name,
         })
     }
 
@@ -151,7 +178,7 @@ impl ScyllaDb {
     ) -> anyhow::Result<Vec<KvEntry>> {
         let rows = if let Some(prefix) = &params.key_prefix {
             // Dynamic query with prefix range
-            let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix);
+            let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix, &self.table_name);
             self.scylla_session
                 .query_unpaged(
                     stmt,
@@ -243,5 +270,115 @@ impl ScyllaDb {
             .collect();
 
         Ok(entries)
+    }
+
+    pub async fn get_kv_history(
+        &self,
+        params: &HistoryParams,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        // Query s_kv table for full history
+        // Note: s_kv has clustering order by current_account_id, key, block_height, order_id
+        let result = self
+            .scylla_session
+            .execute_unpaged(
+                &self.get_kv_history,
+                (&params.predecessor_id, &params.current_account_id, &params.key),
+            )
+            .await?
+            .into_rows_result()?;
+
+        let mut entries: Vec<KvEntry> = result
+            .rows::<KvHistoryRow>()?
+            .filter_map(|row_result| match row_result {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in get_kv_history"
+                    );
+                    None
+                }
+            })
+            .map(KvEntry::from)
+            .filter(|entry| {
+                // Apply block height range filters if specified
+                if let Some(from_block) = params.from_block {
+                    if (entry.block_height as i64) < from_block {
+                        return false;
+                    }
+                }
+                if let Some(to_block) = params.to_block {
+                    if (entry.block_height as i64) > to_block {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Sort by block_height based on order parameter
+        entries.sort_by(|a, b| {
+            if params.order.to_lowercase() == "asc" {
+                a.block_height.cmp(&b.block_height)
+            } else {
+                b.block_height.cmp(&a.block_height)
+            }
+        });
+
+        // Apply limit after filtering and sorting
+        entries.truncate(params.limit);
+
+        Ok(entries)
+    }
+
+    pub async fn count_kv(
+        &self,
+        params: &CountParams,
+    ) -> anyhow::Result<usize> {
+        // Query rows to count them
+        let rows = if let Some(prefix) = &params.key_prefix {
+            // Dynamic query with prefix range
+            let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix, &self.table_name);
+            self.scylla_session
+                .query_unpaged(
+                    stmt,
+                    (
+                        &params.predecessor_id,
+                        &params.current_account_id,
+                        &prefix_start,
+                        &prefix_end,
+                    ),
+                )
+                .await?
+                .into_rows_result()?
+        } else {
+            // Prepared query without prefix
+            self.scylla_session
+                .execute_unpaged(
+                    &self.query_kv_no_prefix,
+                    (&params.predecessor_id, &params.current_account_id),
+                )
+                .await?
+                .into_rows_result()?
+        };
+
+        // Count rows efficiently without full deserialization
+        let count = rows
+            .rows::<KvRow>()?
+            .filter_map(|row_result| match row_result {
+                Ok(_) => Some(()),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in count_kv"
+                    );
+                    None
+                }
+            })
+            .count();
+
+        Ok(count)
     }
 }

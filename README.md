@@ -1,8 +1,23 @@
 # FastKV Server
 
-API for querying FastData key-value data stored in ScyllaDB.
+API for querying NEAR blockchain FastData key-value stores (`__fastdata_kv`) stored in ScyllaDB.
 
 **Live:** https://fastdata.up.railway.app
+
+## Supported Use Cases
+
+- **`__fastdata_kv`** - Simple key-value storage with the full key as `(predecessor_id, current_account_id, key)`
+- **SocialDB** - Tree-structured KV store for social graphs (follows, profiles, posts, etc.)
+- Both use the same schema and query patterns, just with hierarchical keys for SocialDB (e.g., `graph/follow/alice.near`)
+
+## Features
+
+- **Latest Values** - Query most recent key-value data from `s_kv_last` table
+- **Full History** - Access complete value history from `s_kv` table
+- **Field Selection** - Request only specific fields to reduce bandwidth (e.g., `fields=key,value`)
+- **Prefix Queries** - Efficient tree traversal for SocialDB-style hierarchical data
+- **Reverse Lookups** - Find all accounts with a specific key
+- **Count Queries** - Get entry counts without fetching data
 
 ## Endpoints
 
@@ -31,8 +46,144 @@ GET /v1/kv/get?predecessor_id={account}&current_account_id={contract}&key={key}
 | `predecessor_id`     | The account that wrote the data                              |
 | `current_account_id` | The contract called (e.g., `social.near`)                    |
 | `key`                | The specific key with which to retrieve its respective value |
+| `fields`             | Optional: Comma-separated list of fields to return (e.g., `key,value`) |
 
 Returns a single entry object if found, or `null` if not found.
+
+**Field Selection Example:**
+
+```bash
+curl "https://fastdata.up.railway.app/v1/kv/get?predecessor_id=james.near&current_account_id=social.near&key=profile/name&fields=key,value"
+```
+
+**Response with field selection:**
+
+```json
+{
+  "key": "profile/name",
+  "value": "\"James\""
+}
+```
+
+**Available fields:** `predecessor_id`, `current_account_id`, `key`, `value`, `block_height`, `block_timestamp`, `receipt_id`, `tx_hash`
+
+### Get History
+
+```
+GET /v1/kv/history?predecessor_id={account}&current_account_id={contract}&key={key}&limit={n}&order={asc|desc}
+```
+
+Retrieves the full history of values for a specific key from the `s_kv` table.
+
+| Parameter            | Description                                                              |
+| -------------------- | ------------------------------------------------------------------------ |
+| `predecessor_id`     | The account that wrote the data                                          |
+| `current_account_id` | The contract called (e.g., `social.near`)                                |
+| `key`                | The specific key to retrieve history for                                 |
+| `limit`              | Max results to return (default: `100`, range: `1-1000`)                  |
+| `order`              | Sort order by block height: `asc` or `desc` (default: `desc`)            |
+| `from_block`         | Optional: Filter entries with block_height >= this value                 |
+| `to_block`           | Optional: Filter entries with block_height <= this value                 |
+| `fields`             | Optional: Comma-separated list of fields to return (e.g., `value,block_height`) |
+
+Returns an array of entries showing how the value changed over time, with the most recent value first (when `order=desc`).
+
+**Example - Get profile name history:**
+
+```bash
+curl "https://fastdata.up.railway.app/v1/kv/history?predecessor_id=james.near&current_account_id=social.near&key=profile/name&limit=10"
+```
+
+**Response:**
+
+```json
+{
+  "entries": [
+    {
+      "predecessor_id": "james.near",
+      "current_account_id": "social.near",
+      "key": "profile/name",
+      "value": "\"James v3\"",
+      "block_height": 183500000,
+      "block_timestamp": 1769900000000000000,
+      "receipt_id": "ghi...",
+      "tx_hash": "rst..."
+    },
+    {
+      "predecessor_id": "james.near",
+      "current_account_id": "social.near",
+      "key": "profile/name",
+      "value": "\"James v2\"",
+      "block_height": 183400000,
+      "block_timestamp": 1769800000000000000,
+      "receipt_id": "abc...",
+      "tx_hash": "xyz..."
+    },
+    {
+      "predecessor_id": "james.near",
+      "current_account_id": "social.near",
+      "key": "profile/name",
+      "value": "\"James\"",
+      "block_height": 183300000,
+      "block_timestamp": 1769700000000000000,
+      "receipt_id": "def...",
+      "tx_hash": "uvw..."
+    }
+  ]
+}
+```
+
+**Use Cases:**
+- Track how a profile evolved over time
+- Audit trail for social graph changes
+- Time-series analysis of on-chain data
+
+### Count Entries
+
+```
+GET /v1/kv/count?predecessor_id={account}&current_account_id={contract}&key_prefix={prefix}
+```
+
+Returns the count of entries matching the query without transferring the actual data. Essential for displaying counts in UIs (e.g., "42 followers").
+
+| Parameter            | Description                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
+| `predecessor_id`     | The account that wrote the data                                                                 |
+| `current_account_id` | The contract called                                                                             |
+| `key_prefix`         | Optional prefix filter (e.g., `graph/follow/`). Cannot be empty string - omit if not filtering. |
+| `accurate`           | If `true`, counts actual rows (default: `false`, currently both modes count actual rows)        |
+
+**Response:**
+
+```json
+{
+  "count": 42,
+  "estimated": false
+}
+```
+
+**Example - Count followers:**
+
+```bash
+curl "https://fastdata.up.railway.app/v1/kv/count?predecessor_id=james.near&current_account_id=social.near&key_prefix=graph/follow/"
+```
+
+**Response:**
+
+```json
+{
+  "count": 42,
+  "estimated": false
+}
+```
+
+**Use Cases:**
+- Display follower/following counts without loading all entries
+- Show "X posts", "Y comments" in UIs
+- Calculate tree size for SocialDB hierarchies
+- Pagination metadata ("Showing 1-10 of 42")
+
+**Note:** Currently performs accurate row counting. The `estimated` field is always `false`. Future optimization may add fast estimation mode.
 
 ### Query Multiple Entries
 
@@ -40,22 +191,42 @@ Returns a single entry object if found, or `null` if not found.
 GET /v1/kv/query?predecessor_id={account}&current_account_id={contract}&key_prefix={prefix}&exclude_null={bool}
 ```
 
-| Parameter            | Description                                    |
-| -------------------- | ---------------------------------------------- |
-| `predecessor_id`     | The account that wrote the data                |
-| `current_account_id` | The contract called                            |
+| Parameter            | Description                                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
+| `predecessor_id`     | The account that wrote the data                                                                 |
+| `current_account_id` | The contract called                                                                             |
 | `key_prefix`         | Optional prefix filter (e.g., `graph/follow/`). Cannot be empty string - omit if not filtering. |
-| `exclude_null`       | If `true`, excludes entries where value is JSON `null` (default: `false`) |
-| `limit`              | Max results after filtering (default: `100`, range: `1-1000`) |
-| `offset`             | Skip N results after filtering (default: `0`)  |
+| `exclude_null`       | If `true`, excludes entries where value is JSON `null` (default: `false`)                       |
+| `limit`              | Max results after filtering (default: `100`, range: `1-1000`)                                   |
+| `offset`             | Skip N results after filtering (default: `0`)                                                   |
+| `fields`             | Optional: Comma-separated list of fields to return (e.g., `key,value`)                          |
 
 **Note:** Pagination is applied after filtering null values, so the actual number of rows scanned from the database may be higher than the limit.
 
-**Example - Get all follows:**
+**Example - Get all follows (SocialDB tree structure):**
 
 ```bash
 curl "https://fastdata.up.railway.app/v1/kv/query?predecessor_id=james.near&current_account_id=social.near&key_prefix=graph/follow/&exclude_null=true"
 ```
+
+This returns all keys under the `graph/follow/` tree:
+
+- `graph/follow/alice.near`
+- `graph/follow/bob.near`
+- etc.
+
+**Example - Get entire profile tree:**
+
+```bash
+curl "https://fastdata.up.railway.app/v1/kv/query?predecessor_id=alice.near&current_account_id=social.near&key_prefix=profile/&exclude_null=true"
+```
+
+Returns all profile keys:
+
+- `profile/name`
+- `profile/image`
+- `profile/description`
+- etc.
 
 ### Reverse Lookup
 
@@ -67,13 +238,14 @@ Find all accounts that have a specific key (e.g., "who follows root.near?").
 
 Results are automatically deduplicated by `predecessor_id`, keeping only the most recent entry for each account. The materialized view returns entries ordered by recency, and the first occurrence of each `predecessor_id` is kept.
 
-| Parameter            | Description                                       |
-| -------------------- | ------------------------------------------------- |
-| `current_account_id` | The contract called                               |
-| `key`                | The exact key to look up                          |
+| Parameter            | Description                                                               |
+| -------------------- | ------------------------------------------------------------------------- |
+| `current_account_id` | The contract called                                                       |
+| `key`                | The exact key to look up                                                  |
 | `exclude_null`       | If `true`, excludes entries where value is JSON `null` (default: `false`) |
-| `limit`              | Max results after filtering (default: `100`, range: `1-1000`) |
-| `offset`             | Skip N results after filtering (default: `0`)     |
+| `limit`              | Max results after filtering (default: `100`, range: `1-1000`)             |
+| `offset`             | Skip N results after filtering (default: `0`)                             |
+| `fields`             | Optional: Comma-separated list of fields to return                        |
 
 **Note:** Pagination is applied after deduplication and filtering, so the actual number of rows scanned may be higher than the limit.
 
@@ -145,16 +317,16 @@ Returns `null` if entry not found.
 
 Each entry object contains the following fields:
 
-| Field                  | Type   | Description                                                                 |
-| ---------------------- | ------ | --------------------------------------------------------------------------- |
-| `predecessor_id`       | string | The NEAR account that wrote this key-value data                             |
-| `current_account_id`   | string | The contract that was called (e.g., `social.near`)                          |
-| `key`                  | string | The key path (e.g., `graph/follow/root.near`, `profile`)                   |
-| `value`                | string | JSON-serialized value (see Data Format section)                            |
-| `block_height`         | number | NEAR blockchain block height when this write occurred                       |
-| `block_timestamp`      | number | Nanoseconds since Unix epoch (divide by 1e9 for seconds)                   |
-| `receipt_id`           | string | NEAR protocol receipt ID for this transaction                               |
-| `tx_hash`              | string | NEAR protocol transaction hash                                              |
+| Field                | Type   | Description                                              |
+| -------------------- | ------ | -------------------------------------------------------- |
+| `predecessor_id`     | string | The NEAR account that wrote this key-value data          |
+| `current_account_id` | string | The contract that was called (e.g., `social.near`)       |
+| `key`                | string | The key path (e.g., `graph/follow/root.near`, `profile`) |
+| `value`              | string | JSON-serialized value (see Data Format section)          |
+| `block_height`       | number | NEAR blockchain block height when this write occurred    |
+| `block_timestamp`    | number | Nanoseconds since Unix epoch (divide by 1e9 for seconds) |
+| `receipt_id`         | string | NEAR protocol receipt ID for this transaction            |
+| `tx_hash`            | string | NEAR protocol transaction hash                           |
 
 ## Data Format
 
@@ -167,11 +339,12 @@ Values are stored as JSON-serialized strings. The indexer converts all values to
 - Empty JSON string `""` → stored as `"\"\""`
 
 **Example response values:**
+
 ```json
 {
-  "value": "\"\"",        // Empty string (deleted/cleared value)
-  "value": "null",        // Null (deleted key)
-  "value": "{\"name\":\"Alice\"}"  // JSON object
+  "value": "\"\"", // Empty string (deleted/cleared value)
+  "value": "null", // Null (deleted key)
+  "value": "{\"name\":\"Alice\"}" // JSON object
 }
 ```
 
@@ -264,7 +437,9 @@ CMD ["fastkv-server"]
 
 The server connects to the keyspace `fastdata_{CHAIN_ID}` (e.g., `fastdata_mainnet`).
 
-Queries the `s_kv_last` table:
+### Latest Values Table
+
+`s_kv_last` - Stores only the most recent value for each key:
 
 ```sql
 CREATE TABLE s_kv_last (
@@ -280,7 +455,32 @@ CREATE TABLE s_kv_last (
 );
 ```
 
-And the `mv_kv_cur_key` materialized view for reverse lookups.
+### History Table
+
+`s_kv` - Stores complete history of all values:
+
+```sql
+CREATE TABLE s_kv (
+    predecessor_id text,
+    current_account_id text,
+    key text,
+    block_height bigint,
+    order_id bigint,
+    value text,
+    block_timestamp bigint,
+    receipt_id text,
+    tx_hash text,
+    signer_id text,
+    shard_id int,
+    receipt_index int,
+    action_index int,
+    PRIMARY KEY ((predecessor_id), current_account_id, key, block_height, order_id)
+);
+```
+
+### Reverse Lookup View
+
+`mv_kv_cur_key` - Materialized view for reverse lookups (finding all accounts with a specific key).
 
 ### Query Configuration
 

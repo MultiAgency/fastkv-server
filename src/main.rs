@@ -3,7 +3,7 @@ mod models;
 mod queries;
 mod scylladb;
 
-use crate::handlers::{get_kv_handler, health_check, query_kv_handler, reverse_kv_handler};
+use crate::handlers::{count_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler};
 use crate::scylladb::ScyllaDb;
 use actix_cors::Cors;
 use actix_web::http::header;
@@ -12,8 +12,44 @@ use dotenv::dotenv;
 use fastnear_primitives::types::ChainId;
 use std::env;
 use std::sync::Arc;
+use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
 
 const PROJECT_ID: &str = "fastkv-server";
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handlers::health_check,
+        handlers::get_kv_handler,
+        handlers::query_kv_handler,
+        handlers::history_kv_handler,
+        handlers::count_kv_handler,
+        handlers::reverse_kv_handler,
+    ),
+    components(schemas(
+        models::KvEntry,
+        models::QueryResponse,
+        models::HealthResponse,
+        models::CountResponse,
+        models::GetParams,
+        models::QueryParams,
+        models::HistoryParams,
+        models::ReverseParams,
+        models::CountParams,
+        models::ApiError,
+    )),
+    info(
+        title = "FastKV API",
+        version = "1.0.0",
+        description = "Query FastData KV entries from ScyllaDB. This API provides access to NEAR Protocol contract storage data."
+    ),
+    tags(
+        (name = "health", description = "Health check endpoints"),
+        (name = "kv", description = "Key-Value storage operations")
+    )
+)]
+struct ApiDoc;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -69,13 +105,17 @@ async fn main() -> std::io::Result<()> {
                 scylladb: Arc::clone(&scylladb),
             }))
             .wrap(cors)
+            .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::new(
                 "%{r}a \"%r\"	%s %b \"%{Referer}i\" \"%{User-Agent}i\" %T",
             ))
             .wrap(tracing_actix_web::TracingLogger::default())
+            .service(Scalar::with_url("/docs", ApiDoc::openapi()))
             .service(health_check)
             .service(get_kv_handler)
             .service(query_kv_handler)
+            .service(history_kv_handler)
+            .service(count_kv_handler)
             .service(reverse_kv_handler)
     })
     .bind(format!(

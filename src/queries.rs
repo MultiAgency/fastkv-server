@@ -1,9 +1,12 @@
 use scylla::frame::types::Consistency;
 use scylla::statement::Statement;
 
-pub fn build_prefix_query(prefix: &str) -> (Statement, String, String) {
-    let query_text =
-        "SELECT predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash FROM s_kv_last WHERE predecessor_id = ? AND current_account_id = ? AND key >= ? AND key < ?";
+pub fn build_prefix_query(prefix: &str, table_name: &str) -> (Statement, String, String) {
+    let columns = "predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash";
+    let query_text = format!(
+        "SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key >= ? AND key < ?",
+        columns, table_name
+    );
 
     let mut stmt = Statement::new(query_text);
     stmt.set_consistency(Consistency::LocalOne);
@@ -34,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_build_prefix_query() {
-        let (_stmt, start, end) = build_prefix_query("graph/follow/");
+        let (_stmt, start, end) = build_prefix_query("graph/follow/", "s_kv_last");
         assert_eq!(start, "graph/follow/");
         assert_eq!(end, "graph/follow/\u{ff}");
     }
