@@ -25,7 +25,10 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter("scylladb=info,fastkv-server=info")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "scylladb=info,fastkv-server=info".into()),
+        )
         .init();
 
     let chain_id: ChainId = env::var("CHAIN_ID")
@@ -59,8 +62,7 @@ async fn main() -> std::io::Result<()> {
                 header::AUTHORIZATION,
                 header::ACCEPT,
             ])
-            .max_age(3600)
-            .supports_credentials();
+            .max_age(3600);
 
         App::new()
             .app_data(web::Data::new(AppState {
@@ -76,7 +78,10 @@ async fn main() -> std::io::Result<()> {
             .service(query_kv_handler)
             .service(reverse_kv_handler)
     })
-    .bind(format!("0.0.0.0:{}", env::var("PORT").unwrap()))?
+    .bind(format!(
+        "0.0.0.0:{}",
+        env::var("PORT").unwrap_or_else(|_| "3001".to_string())
+    ))?
     .run()
     .await?;
 

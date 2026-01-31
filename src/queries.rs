@@ -7,6 +7,7 @@ pub fn build_prefix_query(prefix: &str) -> (Statement, String, String) {
 
     let mut stmt = Statement::new(query_text);
     stmt.set_consistency(Consistency::LocalOne);
+    stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
 
     let prefix_start = prefix.to_string();
     let prefix_end = compute_prefix_end(prefix);

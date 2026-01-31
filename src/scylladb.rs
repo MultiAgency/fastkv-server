@@ -27,18 +27,19 @@ pub fn create_rustls_client_config() -> Arc<ClientConfig> {
     }
 
     let ca_cert_path = env::var("SCYLLA_SSL_CA").expect("SCYLLA_SSL_CA required for TLS");
-    let ca_certs = rustls::pki_types::CertificateDer::from_pem_file(ca_cert_path)
-        .expect("Failed to load CA certs");
+    let ca_certs = rustls::pki_types::CertificateDer::from_pem_file(&ca_cert_path)
+        .unwrap_or_else(|e| panic!("Failed to load CA cert from '{}': {}", ca_cert_path, e));
 
     let mut root_store = RootCertStore::empty();
-    root_store.add(ca_certs).expect("Failed to add CA certs");
+    root_store.add(ca_certs)
+        .unwrap_or_else(|e| panic!("Failed to add CA certs to root store: {}", e));
 
     let config = match (env::var("SCYLLA_SSL_CERT").ok(), env::var("SCYLLA_SSL_KEY").ok()) {
         (Some(cert_path), Some(key_path)) => {
-            let client_certs = rustls::pki_types::CertificateDer::from_pem_file(cert_path)
-                .expect("Failed to load client certs");
-            let client_key = rustls::pki_types::PrivateKeyDer::from_pem_file(key_path)
-                .expect("Failed to load client key");
+            let client_certs = rustls::pki_types::CertificateDer::from_pem_file(&cert_path)
+                .unwrap_or_else(|e| panic!("Failed to load client cert from '{}': {}", cert_path, e));
+            let client_key = rustls::pki_types::PrivateKeyDer::from_pem_file(&key_path)
+                .unwrap_or_else(|e| panic!("Failed to load client key from '{}': {}", key_path, e));
             ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_client_auth_cert(vec![client_certs], client_key)
@@ -116,6 +117,7 @@ impl ScyllaDb {
     ) -> anyhow::Result<PreparedStatement> {
         let mut query = scylla::statement::Statement::new(query_text);
         query.set_consistency(consistency);
+        query.set_request_timeout(Some(std::time::Duration::from_secs(10)));
         Ok(scylla_db_session.prepare(query).await?)
     }
 
@@ -175,7 +177,17 @@ impl ScyllaDb {
 
         let entries: Vec<KvEntry> = rows
             .rows::<KvRow>()?
-            .filter_map(|row_result| row_result.ok())
+            .filter_map(|row_result| match row_result {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in query_kv_with_pagination"
+                    );
+                    None
+                }
+            })
             .map(KvEntry::from)
             .filter(|entry| {
                 // Apply exclude_null filter
@@ -201,7 +213,17 @@ impl ScyllaDb {
         let mut seen_predecessors = HashSet::new();
         let entries: Vec<KvEntry> = rows
             .rows::<KvRow>()?
-            .filter_map(|row_result| row_result.ok())
+            .filter_map(|row_result| match row_result {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in reverse_kv_with_dedup"
+                    );
+                    None
+                }
+            })
             .map(KvEntry::from)
             .filter(|entry| {
                 // Deduplicate by predecessor_id (keep first = most recent)

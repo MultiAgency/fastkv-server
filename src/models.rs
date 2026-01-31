@@ -36,8 +36,8 @@ impl From<KvRow> for KvEntry {
             current_account_id: row.current_account_id,
             key: row.key,
             value: row.value,
-            block_height: row.block_height as u64,
-            block_timestamp: row.block_timestamp as u64,
+            block_height: row.block_height.max(0) as u64,
+            block_timestamp: row.block_timestamp.max(0) as u64,
             receipt_id: row.receipt_id,
             tx_hash: row.tx_hash,
         }

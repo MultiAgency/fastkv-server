@@ -14,12 +14,29 @@ pub async fn get_kv_handler(
     query: web::Query<GetParams>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
+    // Validate required parameters
+    if query.predecessor_id.trim().is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "predecessor_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.trim().is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.key.trim().is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "key cannot be empty".to_string(),
+        ));
+    }
+
     tracing::info!(
         target: PROJECT_ID,
-        "GET /v1/kv/get predecessor_id={} current_account_id={} key={}",
-        query.predecessor_id,
-        query.current_account_id,
-        query.key
+        predecessor_id = %query.predecessor_id,
+        current_account_id = %query.current_account_id,
+        key = %query.key,
+        "GET /v1/kv/get"
     );
 
     let entry = app_state
@@ -39,21 +56,42 @@ pub async fn query_kv_handler(
     query: web::Query<QueryParams>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    // Validate limit
-    if query.limit > 1000 {
+    // Validate required parameters
+    if query.predecessor_id.trim().is_empty() {
         return Err(ApiError::InvalidParameter(
-            "limit cannot exceed 1000".to_string(),
+            "predecessor_id cannot be empty".to_string(),
         ));
+    }
+    if query.current_account_id.trim().is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+
+    // Validate limit
+    if query.limit == 0 || query.limit > 1000 {
+        return Err(ApiError::InvalidParameter(
+            "limit must be between 1 and 1000".to_string(),
+        ));
+    }
+
+    // Validate key_prefix is not empty if provided
+    if let Some(ref prefix) = query.key_prefix {
+        if prefix.is_empty() {
+            return Err(ApiError::InvalidParameter(
+                "key_prefix cannot be empty string (omit parameter if not filtering)".to_string(),
+            ));
+        }
     }
 
     tracing::info!(
         target: PROJECT_ID,
-        "GET /v1/kv/query predecessor_id={} current_account_id={} key_prefix={:?} limit={} offset={}",
-        query.predecessor_id,
-        query.current_account_id,
-        query.key_prefix,
-        query.limit,
-        query.offset
+        predecessor_id = %query.predecessor_id,
+        current_account_id = %query.current_account_id,
+        key_prefix = ?query.key_prefix,
+        limit = query.limit,
+        offset = query.offset,
+        "GET /v1/kv/query"
     );
 
     let entries = app_state
@@ -69,20 +107,32 @@ pub async fn reverse_kv_handler(
     query: web::Query<ReverseParams>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    // Validate limit
-    if query.limit > 1000 {
+    // Validate required parameters
+    if query.current_account_id.trim().is_empty() {
         return Err(ApiError::InvalidParameter(
-            "limit cannot exceed 1000".to_string(),
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.key.trim().is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "key cannot be empty".to_string(),
+        ));
+    }
+
+    // Validate limit
+    if query.limit == 0 || query.limit > 1000 {
+        return Err(ApiError::InvalidParameter(
+            "limit must be between 1 and 1000".to_string(),
         ));
     }
 
     tracing::info!(
         target: PROJECT_ID,
-        "GET /v1/kv/reverse current_account_id={} key={} limit={} offset={}",
-        query.current_account_id,
-        query.key,
-        query.limit,
-        query.offset
+        current_account_id = %query.current_account_id,
+        key = %query.key,
+        limit = query.limit,
+        offset = query.offset,
+        "GET /v1/kv/reverse"
     );
 
     let entries = app_state
