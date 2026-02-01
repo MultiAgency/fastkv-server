@@ -3,7 +3,7 @@ mod models;
 mod queries;
 mod scylladb;
 
-use crate::handlers::{count_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler};
+use crate::handlers::{batch_kv_handler, count_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler};
 use crate::scylladb::ScyllaDb;
 use actix_cors::Cors;
 use actix_web::http::header;
@@ -26,6 +26,7 @@ const PROJECT_ID: &str = "fastkv-server";
         handlers::history_kv_handler,
         handlers::count_kv_handler,
         handlers::reverse_kv_handler,
+        handlers::batch_kv_handler,
     ),
     components(schemas(
         models::KvEntry,
@@ -38,6 +39,9 @@ const PROJECT_ID: &str = "fastkv-server";
         models::ReverseParams,
         models::CountParams,
         models::ApiError,
+        models::BatchQuery,
+        models::BatchResultItem,
+        models::BatchResponse,
     )),
     info(
         title = "FastKV API",
@@ -92,7 +96,7 @@ async fn main() -> std::io::Result<()> {
         // Configure CORS middleware
         let cors = Cors::default()
             .allow_any_origin()
-            .allowed_methods(vec!["GET"])
+            .allowed_methods(vec!["GET", "POST"])
             .allowed_headers(vec![
                 header::CONTENT_TYPE,
                 header::AUTHORIZATION,
@@ -117,6 +121,7 @@ async fn main() -> std::io::Result<()> {
             .service(history_kv_handler)
             .service(count_kv_handler)
             .service(reverse_kv_handler)
+            .service(batch_kv_handler)
     })
     .bind(format!(
         "0.0.0.0:{}",

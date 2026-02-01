@@ -1,4 +1,4 @@
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use crate::models::*;
 use crate::AppState;
 
@@ -444,4 +444,88 @@ pub async fn reverse_kv_handler(
     } else {
         Ok(HttpResponse::Ok().json(QueryResponse { entries }))
     }
+}
+
+const MAX_BATCH_KEYS: usize = 100;
+const MAX_BATCH_KEY_LENGTH: usize = 1024;
+
+/// Batch lookup: get values for multiple keys in a single request
+#[utoipa::path(
+    post,
+    path = "/v1/kv/batch",
+    request_body = BatchQuery,
+    responses(
+        (status = 200, description = "Batch results", body = BatchResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[post("/v1/kv/batch")]
+pub async fn batch_kv_handler(
+    body: web::Json<BatchQuery>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    if body.predecessor.is_empty() || body.predecessor.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            "predecessor must be a valid NEAR account ID".to_string(),
+        ));
+    }
+    if body.current_account.is_empty() || body.current_account.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            "current_account must be a valid NEAR account ID".to_string(),
+        ));
+    }
+    if body.keys.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "keys cannot be empty".to_string(),
+        ));
+    }
+    if body.keys.len() > MAX_BATCH_KEYS {
+        return Err(ApiError::InvalidParameter(
+            format!("keys cannot exceed {} items", MAX_BATCH_KEYS),
+        ));
+    }
+    for key in &body.keys {
+        if key.len() > MAX_BATCH_KEY_LENGTH {
+            return Err(ApiError::InvalidParameter(
+                format!("each key cannot exceed {} characters", MAX_BATCH_KEY_LENGTH),
+            ));
+        }
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        predecessor = %body.predecessor,
+        current_account = %body.current_account,
+        key_count = body.keys.len(),
+        "POST /v1/kv/batch"
+    );
+
+    let futures: Vec<_> = body
+        .keys
+        .iter()
+        .map(|key| {
+            app_state
+                .scylladb
+                .get_kv_last(&body.predecessor, &body.current_account, key)
+        })
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    let items: Vec<BatchResultItem> = body
+        .keys
+        .iter()
+        .zip(results)
+        .map(|(key, result)| {
+            let value = result.ok().flatten();
+            BatchResultItem {
+                key: key.clone(),
+                found: value.is_some(),
+                value,
+            }
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(BatchResponse { results: items }))
 }

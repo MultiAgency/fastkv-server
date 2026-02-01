@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 pub struct ScyllaDb {
     get_kv: PreparedStatement,
+    get_kv_last: PreparedStatement,
     query_kv_no_prefix: PreparedStatement,
     reverse_kv: PreparedStatement,
     get_kv_history: PreparedStatement,
@@ -132,6 +133,11 @@ impl ScyllaDb {
                 &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key = ?", columns, table_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
+            get_kv_last: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT value FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key = ?", table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
             query_kv_no_prefix: Self::prepare_query(
                 &scylla_session,
                 &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ?", columns, table_name),
@@ -187,6 +193,30 @@ impl ScyllaDb {
             .map(KvEntry::from);
 
         Ok(entry)
+    }
+
+    pub async fn get_kv_last(
+        &self,
+        predecessor_id: &str,
+        current_account_id: &str,
+        key: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let result = self
+            .scylla_session
+            .execute_unpaged(
+                &self.get_kv_last,
+                (predecessor_id, current_account_id, key),
+            )
+            .await?
+            .into_rows_result()?;
+
+        let value = result
+            .rows::<(Option<String>,)>()?
+            .next()
+            .transpose()?
+            .and_then(|row| row.0);
+
+        Ok(value)
     }
 
     pub async fn query_kv_with_pagination(

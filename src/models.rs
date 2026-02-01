@@ -261,6 +261,26 @@ pub struct CountResponse {
     pub estimated: bool,
 }
 
+// Batch query structs
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct BatchQuery {
+    pub predecessor: String,
+    pub current_account: String,
+    pub keys: Vec<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct BatchResultItem {
+    pub key: String,
+    pub value: Option<String>,
+    pub found: bool,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct BatchResponse {
+    pub results: Vec<BatchResultItem>,
+}
+
 // Error handling
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", content = "message")]
