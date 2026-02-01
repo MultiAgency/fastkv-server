@@ -4,7 +4,7 @@ mod queries;
 mod scylladb;
 mod tree;
 
-use crate::handlers::{batch_kv_handler, count_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler};
+use crate::handlers::{batch_kv_handler, by_key_handler, count_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler};
 use crate::scylladb::ScyllaDb;
 use actix_cors::Cors;
 use actix_web::http::header;
@@ -28,6 +28,7 @@ const PROJECT_ID: &str = "fastkv-server";
         handlers::count_kv_handler,
         handlers::reverse_kv_handler,
         handlers::batch_kv_handler,
+        handlers::by_key_handler,
     ),
     components(schemas(
         models::KvEntry,
@@ -44,6 +45,7 @@ const PROJECT_ID: &str = "fastkv-server";
         models::BatchResultItem,
         models::BatchResponse,
         models::TreeResponse,
+        models::ByKeyParams,
     )),
     info(
         title = "FastKV API",
@@ -124,6 +126,7 @@ async fn main() -> std::io::Result<()> {
             .service(count_kv_handler)
             .service(reverse_kv_handler)
             .service(batch_kv_handler)
+            .service(by_key_handler)
     })
     .bind(format!(
         "0.0.0.0:{}",

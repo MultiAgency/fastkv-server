@@ -252,6 +252,30 @@ fn default_order_desc() -> String {
     "desc".to_string()
 }
 
+// By-key query parameters (reverse lookup by exact key across all predecessors)
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct ByKeyParams {
+    pub key: String,
+    pub current_account_id: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub fields: Option<String>,
+}
+
+impl ByKeyParams {
+    pub fn parse_fields(&self) -> Option<Vec<String>> {
+        self.fields.as_ref().map(|f| {
+            f.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+    }
+}
+
 // Count query parameters
 #[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct CountParams {

@@ -466,6 +466,79 @@ pub async fn reverse_kv_handler(
     }
 }
 
+/// Lookup by exact key: find all predecessors who wrote to a specific key for a given account
+#[utoipa::path(
+    get,
+    path = "/v1/kv/by-key",
+    params(ByKeyParams),
+    responses(
+        (status = 200, description = "List of entries matching the key", body = QueryResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/by-key")]
+pub async fn by_key_handler(
+    query: web::Query<ByKeyParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    if query.key.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "key cannot be empty".to_string(),
+        ));
+    }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("key cannot exceed {} characters", MAX_KEY_LENGTH),
+        ));
+    }
+    if query.current_account_id.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.limit == 0 || query.limit > 1000 {
+        return Err(ApiError::InvalidParameter(
+            "limit must be between 1 and 1000".to_string(),
+        ));
+    }
+    if query.offset > MAX_OFFSET {
+        return Err(ApiError::InvalidParameter(
+            format!("offset cannot exceed {}", MAX_OFFSET),
+        ));
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        key = %query.key,
+        current_account_id = %query.current_account_id,
+        limit = query.limit,
+        offset = query.offset,
+        "GET /v1/kv/by-key"
+    );
+
+    let entries = app_state
+        .scylladb
+        .query_by_key(&query)
+        .await?;
+
+    let fields = query.parse_fields();
+    if fields.is_some() {
+        let filtered: Vec<_> = entries
+            .into_iter()
+            .map(|e| e.to_json_with_fields(&fields))
+            .collect();
+        Ok(HttpResponse::Ok().json(serde_json::json!({ "entries": filtered })))
+    } else {
+        Ok(HttpResponse::Ok().json(QueryResponse { entries }))
+    }
+}
+
 const MAX_BATCH_KEYS: usize = 100;
 const MAX_BATCH_KEY_LENGTH: usize = 1024;
 
