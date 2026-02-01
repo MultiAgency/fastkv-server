@@ -11,7 +11,6 @@ pub const MAX_KEY_LENGTH: usize = 10000;
 pub const MAX_BATCH_KEYS: usize = 100;
 pub const MAX_BATCH_KEY_LENGTH: usize = 1024;
 pub const MAX_COMMIT_KEYS: usize = 50;
-pub const MAX_COUNT_SCAN: usize = 1_000_000;
 pub const MAX_SOCIAL_RESULTS: usize = 1000;
 pub const MAX_SOCIAL_KEYS: usize = 100;
 pub const MAX_STREAM_ERRORS: usize = 10;
@@ -50,16 +49,11 @@ pub struct KvHistoryRow {
     pub action_index: i32,
 }
 
-// Lightweight row for keys-only queries (avoids fetching value and metadata)
-#[derive(DeserializeRow, Debug, Clone)]
-pub struct KvKeyRow {
-    pub key: String,
-}
-
-// Lightweight row for predecessor-only queries
+// Lightweight row for predecessor-only queries (with optional value for null filtering)
 #[derive(DeserializeRow, Debug, Clone)]
 pub struct KvPredecessorRow {
     pub predecessor_id: String,
+    pub value: String,
 }
 
 // API response - keeps NEAR/FastData field names for compatibility
@@ -263,24 +257,6 @@ fn default_order_desc() -> String {
     "desc".to_string()
 }
 
-// Keys query parameters (list keys without values)
-#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct KeysParams {
-    pub predecessor_id: String,
-    pub current_account_id: String,
-    #[serde(default)]
-    pub key_prefix: Option<String>,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    #[serde(default)]
-    pub offset: usize,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct KeysResponse {
-    pub keys: Vec<String>,
-}
-
 // Accounts query parameters (list unique predecessors for a current_account_id + key pattern)
 #[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct AccountsParams {
@@ -292,19 +268,6 @@ pub struct AccountsParams {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct AccountsResponse {
-    pub accounts: Vec<String>,
-    pub count: usize,
-}
-
-// Accounts count query parameters
-#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct AccountsCountParams {
-    pub current_account_id: String,
-    pub key: String,
 }
 
 // By-key query parameters (reverse lookup by exact key across all predecessors)
@@ -320,22 +283,6 @@ pub struct ByKeyParams {
     pub fields: Option<String>,
 }
 
-
-// Count query parameters
-#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct CountParams {
-    pub predecessor_id: String,
-    pub current_account_id: String,
-    #[serde(default)]
-    pub key_prefix: Option<String>,
-}
-
-// Count response
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct CountResponse {
-    pub count: usize,
-    pub estimated: bool,
-}
 
 // Batch query structs
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -428,53 +375,9 @@ pub struct SocialFollowParams {
     pub offset: usize,
 }
 
-// GET /v1/social/likes, /comments, /reposts query params
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct SocialItemParams {
-    pub path: String,
-    #[serde(alias = "blockHeight")]
-    pub block_height: u64,
-    #[serde(default = "default_order_desc")]
-    pub order: String,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
-
 // GET /v1/social/feed/account query params
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct SocialAccountFeedParams {
-    #[serde(alias = "accountId")]
-    pub account_id: String,
-    #[serde(default = "default_order_desc")]
-    pub order: String,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    #[serde(default)]
-    pub from: Option<u64>,
-}
-
-// GET /v1/social/feed/hashtag query params
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct SocialHashtagFeedParams {
-    pub hashtag: String,
-    #[serde(default = "default_order_desc")]
-    pub order: String,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
-
-// GET /v1/social/feed/activity query params
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct SocialActivityFeedParams {
-    #[serde(default = "default_order_desc")]
-    pub order: String,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
-
-// GET /v1/social/notifications query params
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub struct SocialNotificationsParams {
     #[serde(alias = "accountId")]
     pub account_id: String,
     #[serde(default = "default_order_desc")]

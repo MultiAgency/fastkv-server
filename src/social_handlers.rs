@@ -701,95 +701,26 @@ pub async fn social_following_handler(
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, "GET /v1/social/following");
 
     // Following are keys under "graph/follow/" written by this account to social.near
-    let keys_params = KeysParams {
+    let params = QueryParams {
         predecessor_id: query.account_id.clone(),
         current_account_id: SOCIAL_CONTRACT.clone(),
         key_prefix: Some("graph/follow/".to_string()),
+        exclude_null: Some(true),
         limit: query.limit,
         offset: query.offset,
+        fields: None,
+        format: None,
     };
 
-    let keys = app_state.scylladb.query_keys(&keys_params).await?;
+    let entries = app_state.scylladb.query_kv_with_pagination(&params).await?;
 
     // Strip "graph/follow/" prefix to get account IDs
-    let accounts: Vec<String> = keys.into_iter()
-        .filter_map(|k| k.strip_prefix("graph/follow/").map(|s| s.to_string()))
+    let accounts: Vec<String> = entries.into_iter()
+        .filter_map(|e| e.key.strip_prefix("graph/follow/").map(|s| s.to_string()))
         .collect();
     let count = accounts.len();
 
     Ok(HttpResponse::Ok().json(SocialFollowResponse { accounts, count }))
-}
-
-async fn handle_item_query(
-    query: &SocialItemParams,
-    app_state: &AppState,
-    action: &str,
-    endpoint: &str,
-) -> Result<HttpResponse, ApiError> {
-    validate_item_params(query)?;
-    tracing::info!(target: PROJECT_ID, path = %query.path, block_height = query.block_height, endpoint);
-
-    let key = format!("{}\n{}", query.path, query.block_height);
-    let entries = query_index(app_state, action, &key, &query.order, query.limit, None).await?;
-
-    Ok(HttpResponse::Ok().json(IndexResponse { entries }))
-}
-
-/// Get likes for an item
-#[utoipa::path(
-    get,
-    path = "/v1/social/likes",
-    params(SocialItemParams),
-    responses(
-        (status = 200, description = "Like entries", body = IndexResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError)
-    ),
-    tag = "social"
-)]
-#[get("/v1/social/likes")]
-pub async fn social_likes_handler(
-    query: web::Query<SocialItemParams>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    handle_item_query(&query, &app_state, "like", "GET /v1/social/likes").await
-}
-
-/// Get comments for an item
-#[utoipa::path(
-    get,
-    path = "/v1/social/comments",
-    params(SocialItemParams),
-    responses(
-        (status = 200, description = "Comment entries", body = IndexResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError)
-    ),
-    tag = "social"
-)]
-#[get("/v1/social/comments")]
-pub async fn social_comments_handler(
-    query: web::Query<SocialItemParams>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    handle_item_query(&query, &app_state, "comment", "GET /v1/social/comments").await
-}
-
-/// Get reposts for an item
-#[utoipa::path(
-    get,
-    path = "/v1/social/reposts",
-    params(SocialItemParams),
-    responses(
-        (status = 200, description = "Repost entries", body = IndexResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError)
-    ),
-    tag = "social"
-)]
-#[get("/v1/social/reposts")]
-pub async fn social_reposts_handler(
-    query: web::Query<SocialItemParams>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    handle_item_query(&query, &app_state, "repost", "GET /v1/social/reposts").await
 }
 
 /// Get posts from a specific account
@@ -840,96 +771,7 @@ pub async fn social_account_feed_handler(
     Ok(HttpResponse::Ok().json(SocialFeedResponse { posts }))
 }
 
-/// Get posts tagged with a hashtag
-#[utoipa::path(
-    get,
-    path = "/v1/social/feed/hashtag",
-    params(SocialHashtagFeedParams),
-    responses(
-        (status = 200, description = "Hashtag feed", body = IndexResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError)
-    ),
-    tag = "social"
-)]
-#[get("/v1/social/feed/hashtag")]
-pub async fn social_hashtag_feed_handler(
-    query: web::Query<SocialHashtagFeedParams>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    if query.hashtag.is_empty() {
-        return Err(ApiError::InvalidParameter("hashtag cannot be empty".to_string()));
-    }
-    validate_limit(query.limit)?;
-
-    tracing::info!(target: PROJECT_ID, hashtag = %query.hashtag, "GET /v1/social/feed/hashtag");
-
-    let entries = query_index(&app_state, "hashtag", &query.hashtag, &query.order, query.limit, None).await?;
-
-    Ok(HttpResponse::Ok().json(IndexResponse { entries }))
-}
-
-/// Get all recent posts (activity feed)
-#[utoipa::path(
-    get,
-    path = "/v1/social/feed/activity",
-    params(SocialActivityFeedParams),
-    responses(
-        (status = 200, description = "Activity feed", body = IndexResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError)
-    ),
-    tag = "social"
-)]
-#[get("/v1/social/feed/activity")]
-pub async fn social_activity_feed_handler(
-    query: web::Query<SocialActivityFeedParams>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    validate_limit(query.limit)?;
-
-    tracing::info!(target: PROJECT_ID, "GET /v1/social/feed/activity");
-
-    let entries = query_index(&app_state, "post", "main", &query.order, query.limit, None).await?;
-
-    Ok(HttpResponse::Ok().json(IndexResponse { entries }))
-}
-
-/// Get notifications for an account
-#[utoipa::path(
-    get,
-    path = "/v1/social/notifications",
-    params(SocialNotificationsParams),
-    responses(
-        (status = 200, description = "Notification entries", body = IndexResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError)
-    ),
-    tag = "social"
-)]
-#[get("/v1/social/notifications")]
-pub async fn social_notifications_handler(
-    query: web::Query<SocialNotificationsParams>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    if query.account_id.is_empty() {
-        return Err(ApiError::InvalidParameter("account_id cannot be empty".to_string()));
-    }
-    validate_limit(query.limit)?;
-
-    tracing::info!(target: PROJECT_ID, account_id = %query.account_id, "GET /v1/social/notifications");
-
-    let entries = query_index(&app_state, "notify", &query.account_id, &query.order, query.limit, query.from).await?;
-
-    Ok(HttpResponse::Ok().json(IndexResponse { entries }))
-}
-
 // ===== Utility functions =====
-
-fn validate_item_params(query: &SocialItemParams) -> Result<(), ApiError> {
-    if query.path.is_empty() {
-        return Err(ApiError::InvalidParameter("path cannot be empty".to_string()));
-    }
-    validate_limit(query.limit)?;
-    Ok(())
-}
 
 fn merge_json(target: &mut serde_json::Map<String, serde_json::Value>, source: &serde_json::Value) {
     if let serde_json::Value::Object(source_obj) = source {
