@@ -867,6 +867,7 @@ dependencies = [
  "anyhow",
  "dotenv",
  "fastnear-primitives",
+ "futures",
  "rustls",
  "scylla",
  "serde",

@@ -7,6 +7,7 @@ use crate::queries::build_prefix_query;
 use fastnear_primitives::types::ChainId;
 use rustls::pki_types::pem::PemObject;
 use rustls::{ClientConfig, RootCertStore};
+use futures::stream::StreamExt;
 use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
@@ -23,31 +24,32 @@ pub struct ScyllaDb {
     pub reverse_view_name: String,
 }
 
-pub fn create_rustls_client_config() -> Arc<ClientConfig> {
+pub fn create_rustls_client_config() -> anyhow::Result<Arc<ClientConfig>> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
             .expect("Failed to install default provider");
     }
 
-    let ca_cert_path = env::var("SCYLLA_SSL_CA").expect("SCYLLA_SSL_CA required for TLS");
+    let ca_cert_path = env::var("SCYLLA_SSL_CA")
+        .map_err(|_| anyhow::anyhow!("SCYLLA_SSL_CA required for TLS"))?;
     let ca_certs = rustls::pki_types::CertificateDer::from_pem_file(&ca_cert_path)
-        .unwrap_or_else(|e| panic!("Failed to load CA cert from '{}': {}", ca_cert_path, e));
+        .map_err(|e| anyhow::anyhow!("Failed to load CA cert from '{}': {}", ca_cert_path, e))?;
 
     let mut root_store = RootCertStore::empty();
     root_store.add(ca_certs)
-        .unwrap_or_else(|e| panic!("Failed to add CA certs to root store: {}", e));
+        .map_err(|e| anyhow::anyhow!("Failed to add CA certs to root store: {}", e))?;
 
     let config = match (env::var("SCYLLA_SSL_CERT").ok(), env::var("SCYLLA_SSL_KEY").ok()) {
         (Some(cert_path), Some(key_path)) => {
             let client_certs = rustls::pki_types::CertificateDer::from_pem_file(&cert_path)
-                .unwrap_or_else(|e| panic!("Failed to load client cert from '{}': {}", cert_path, e));
+                .map_err(|e| anyhow::anyhow!("Failed to load client cert from '{}': {}", cert_path, e))?;
             let client_key = rustls::pki_types::PrivateKeyDer::from_pem_file(&key_path)
-                .unwrap_or_else(|e| panic!("Failed to load client key from '{}': {}", key_path, e));
+                .map_err(|e| anyhow::anyhow!("Failed to load client key from '{}': {}", key_path, e))?;
             ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_client_auth_cert(vec![client_certs], client_key)
-                .expect("Failed to create client config with mTLS")
+                .map_err(|e| anyhow::anyhow!("Failed to create client config with mTLS: {}", e))?
         }
         _ => {
             ClientConfig::builder()
@@ -56,7 +58,7 @@ pub fn create_rustls_client_config() -> Arc<ClientConfig> {
         }
     };
 
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 impl ScyllaDb {
@@ -65,7 +67,10 @@ impl ScyllaDb {
         let scylla_username = env::var("SCYLLA_USERNAME").expect("SCYLLA_USERNAME must be set");
         let scylla_password = env::var("SCYLLA_PASSWORD").expect("SCYLLA_PASSWORD must be set");
 
-        let tls_config = env::var("SCYLLA_SSL_CA").ok().map(|_| create_rustls_client_config());
+        let tls_config = match env::var("SCYLLA_SSL_CA").ok() {
+            Some(_) => Some(create_rustls_client_config()?),
+            None => None,
+        };
 
         let session: Session = SessionBuilder::new()
             .known_node(scylla_url)
@@ -83,8 +88,20 @@ impl ScyllaDb {
     }
 
     pub async fn test_connection(scylla_session: &Session) -> anyhow::Result<()> {
+        let mut stmt = scylla::statement::Statement::new("SELECT now() FROM system.local");
+        stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
         scylla_session
-            .query_unpaged("SELECT now() FROM system.local", &[])
+            .query_unpaged(stmt, &[])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        // Simple query to verify connection
+        let mut stmt = scylla::statement::Statement::new("SELECT now() FROM system.local");
+        stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
+        self.scylla_session
+            .query_unpaged(stmt, &[])
             .await?;
         Ok(())
     }
@@ -176,11 +193,11 @@ impl ScyllaDb {
         &self,
         params: &QueryParams,
     ) -> anyhow::Result<Vec<KvEntry>> {
-        let rows = if let Some(prefix) = &params.key_prefix {
+        let mut rows_stream = if let Some(prefix) = &params.key_prefix {
             // Dynamic query with prefix range
             let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix, &self.table_name);
             self.scylla_session
-                .query_unpaged(
+                .query_iter(
                     stmt,
                     (
                         &params.predecessor_id,
@@ -190,39 +207,51 @@ impl ScyllaDb {
                     ),
                 )
                 .await?
-                .into_rows_result()?
+                .rows_stream::<KvRow>()?
         } else {
             // Prepared query without prefix
             self.scylla_session
-                .execute_unpaged(
-                    &self.query_kv_no_prefix,
+                .execute_iter(
+                    self.query_kv_no_prefix.clone(),
                     (&params.predecessor_id, &params.current_account_id),
                 )
                 .await?
-                .into_rows_result()?
+                .rows_stream::<KvRow>()?
         };
 
-        let entries: Vec<KvEntry> = rows
-            .rows::<KvRow>()?
-            .filter_map(|row_result| match row_result {
-                Ok(row) => Some(row),
+        let exclude_null = params.exclude_null.unwrap_or(false);
+        let mut skipped = 0;
+        let mut entries = Vec::with_capacity(params.limit);
+
+        while let Some(row_result) = rows_stream.next().await {
+            let row = match row_result {
+                Ok(row) => row,
                 Err(e) => {
                     tracing::warn!(
                         target: "fastkv-server",
                         error = %e,
                         "Failed to deserialize row in query_kv_with_pagination"
                     );
-                    None
+                    continue;
                 }
-            })
-            .map(KvEntry::from)
-            .filter(|entry| {
-                // Apply exclude_null filter
-                !params.exclude_null.unwrap_or(false) || entry.value != "null"
-            })
-            .skip(params.offset)
-            .take(params.limit)
-            .collect();
+            };
+
+            let entry = KvEntry::from(row);
+
+            if exclude_null && entry.value == "null" {
+                continue;
+            }
+
+            if skipped < params.offset {
+                skipped += 1;
+                continue;
+            }
+
+            entries.push(entry);
+            if entries.len() >= params.limit {
+                break;
+            }
+        }
 
         Ok(entries)
     }
@@ -231,91 +260,120 @@ impl ScyllaDb {
         &self,
         params: &ReverseParams,
     ) -> anyhow::Result<Vec<KvEntry>> {
-        let rows = self
+        let mut rows_stream = self
             .scylla_session
-            .execute_unpaged(&self.reverse_kv, (&params.current_account_id, &params.key))
+            .execute_iter(self.reverse_kv.clone(), (&params.current_account_id, &params.key))
             .await?
-            .into_rows_result()?;
+            .rows_stream::<KvRow>()?;
 
         let mut seen_predecessors = HashSet::new();
-        let entries: Vec<KvEntry> = rows
-            .rows::<KvRow>()?
-            .filter_map(|row_result| match row_result {
-                Ok(row) => Some(row),
+        let mut entries = Vec::new();
+        let target_count = params.offset + params.limit;
+
+        while let Some(row_result) = rows_stream.next().await {
+            // Safety limit: stop if we've seen too many unique predecessors
+            if seen_predecessors.len() >= 100_000 {
+                break;
+            }
+
+            let row = match row_result {
+                Ok(row) => row,
                 Err(e) => {
                     tracing::warn!(
                         target: "fastkv-server",
                         error = %e,
                         "Failed to deserialize row in reverse_kv_with_dedup"
                     );
-                    None
+                    continue;
                 }
-            })
-            .map(KvEntry::from)
-            .filter(|entry| {
-                // Deduplicate by predecessor_id (keep first = most recent)
-                if seen_predecessors.contains(&entry.predecessor_id) {
-                    false
-                } else {
-                    seen_predecessors.insert(entry.predecessor_id.clone());
-                    true
-                }
-            })
-            .filter(|entry| {
-                // Apply exclude_null filter
-                !params.exclude_null.unwrap_or(false) || entry.value != "null"
-            })
+            };
+
+            let entry = KvEntry::from(row);
+
+            // Deduplicate by predecessor_id (keep first = most recent)
+            if seen_predecessors.contains(&entry.predecessor_id) {
+                continue;
+            }
+
+            seen_predecessors.insert(entry.predecessor_id.clone());
+
+            // Apply exclude_null filter
+            if params.exclude_null.unwrap_or(false) && entry.value == "null" {
+                continue;
+            }
+
+            entries.push(entry);
+
+            // Early termination when we have enough entries
+            if entries.len() >= target_count {
+                break;
+            }
+        }
+
+        // Apply offset and limit
+        let result: Vec<KvEntry> = entries
+            .into_iter()
             .skip(params.offset)
             .take(params.limit)
             .collect();
 
-        Ok(entries)
+        Ok(result)
     }
 
     pub async fn get_kv_history(
         &self,
         params: &HistoryParams,
     ) -> anyhow::Result<Vec<KvEntry>> {
-        // Query s_kv table for full history
+        const MAX_HISTORY_SCAN: usize = 10_000;
+
+        // Query s_kv table for full history using streaming
         // Note: s_kv has clustering order by current_account_id, key, block_height, order_id
-        let result = self
+        let mut rows_stream = self
             .scylla_session
-            .execute_unpaged(
-                &self.get_kv_history,
+            .execute_iter(
+                self.get_kv_history.clone(),
                 (&params.predecessor_id, &params.current_account_id, &params.key),
             )
             .await?
-            .into_rows_result()?;
+            .rows_stream::<KvHistoryRow>()?;
 
-        let mut entries: Vec<KvEntry> = result
-            .rows::<KvHistoryRow>()?
-            .filter_map(|row_result| match row_result {
-                Ok(row) => Some(row),
+        let mut entries: Vec<KvEntry> = Vec::new();
+        let mut scanned = 0usize;
+
+        while let Some(row_result) = rows_stream.next().await {
+            scanned += 1;
+            if scanned > MAX_HISTORY_SCAN {
+                break;
+            }
+
+            let row = match row_result {
+                Ok(row) => row,
                 Err(e) => {
                     tracing::warn!(
                         target: "fastkv-server",
                         error = %e,
                         "Failed to deserialize row in get_kv_history"
                     );
-                    None
+                    continue;
                 }
-            })
-            .map(KvEntry::from)
-            .filter(|entry| {
-                // Apply block height range filters if specified
-                if let Some(from_block) = params.from_block {
-                    if (entry.block_height as i64) < from_block {
-                        return false;
-                    }
+            };
+
+            let entry = KvEntry::from(row);
+
+            // Apply block height range filters if specified
+            if let Some(from_block) = params.from_block {
+                if (entry.block_height as i64) < from_block {
+                    continue;
                 }
-                if let Some(to_block) = params.to_block {
-                    if (entry.block_height as i64) > to_block {
-                        return false;
-                    }
+            }
+            if let Some(to_block) = params.to_block {
+                if (entry.block_height as i64) > to_block {
+                    continue;
                 }
-                true
-            })
-            .collect();
+            }
+
+            entries.push(entry);
+        }
 
         // Sort by block_height based on order parameter
         entries.sort_by(|a, b| {
@@ -335,13 +393,74 @@ impl ScyllaDb {
     pub async fn count_kv(
         &self,
         params: &CountParams,
-    ) -> anyhow::Result<usize> {
-        // Query rows to count them
-        let rows = if let Some(prefix) = &params.key_prefix {
+    ) -> anyhow::Result<(usize, bool)> {
+        // Primary path: Use COUNT(*) for efficient counting
+        let count_result = if let Some(prefix) = &params.key_prefix {
+            // Build COUNT(*) query with prefix range
+            let query_text = format!(
+                "SELECT COUNT(*) FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key >= ? AND key < ?",
+                self.table_name
+            );
+            let prefix_start = prefix.to_string();
+            let prefix_end = format!("{}\u{ff}", prefix); // Compute prefix end inline
+
+            let mut stmt = scylla::statement::Statement::new(query_text);
+            stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
+
+            self.scylla_session
+                .query_unpaged(
+                    stmt,
+                    (&params.predecessor_id, &params.current_account_id, &prefix_start, &prefix_end),
+                )
+                .await
+        } else {
+            // Build COUNT(*) query without prefix
+            let query_text = format!(
+                "SELECT COUNT(*) FROM {} WHERE predecessor_id = ? AND current_account_id = ?",
+                self.table_name
+            );
+
+            let mut stmt = scylla::statement::Statement::new(query_text);
+            stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
+
+            self.scylla_session
+                .query_unpaged(
+                    stmt,
+                    (&params.predecessor_id, &params.current_account_id),
+                )
+                .await
+        };
+
+        // If COUNT(*) succeeds, parse and return the result
+        if let Ok(result) = count_result {
+            if let Ok(rows_result) = result.into_rows_result() {
+                if let Some(Ok(row)) = rows_result.rows::<(i64,)>()?.next() {
+                    let count = row.0.max(0) as usize;
+                    tracing::debug!(
+                        target: "fastkv-server",
+                        count = count,
+                        predecessor_id = %params.predecessor_id,
+                        current_account_id = %params.current_account_id,
+                        "COUNT(*) query succeeded"
+                    );
+                    return Ok((count, false));
+                }
+            }
+        }
+
+        // Fallback: COUNT(*) failed, iterate through rows (legacy method)
+        tracing::warn!(
+            target: "fastkv-server",
+            predecessor_id = %params.predecessor_id,
+            current_account_id = %params.current_account_id,
+            "COUNT(*) query failed, falling back to row iteration"
+        );
+
+        let mut rows_stream = if let Some(prefix) = &params.key_prefix {
             // Dynamic query with prefix range
             let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix, &self.table_name);
             self.scylla_session
-                .query_unpaged(
+                .query_iter(
                     stmt,
                     (
                         &params.predecessor_id,
@@ -351,34 +470,40 @@ impl ScyllaDb {
                     ),
                 )
                 .await?
-                .into_rows_result()?
+                .rows_stream::<KvRow>()?
         } else {
             // Prepared query without prefix
             self.scylla_session
-                .execute_unpaged(
-                    &self.query_kv_no_prefix,
+                .execute_iter(
+                    self.query_kv_no_prefix.clone(),
                     (&params.predecessor_id, &params.current_account_id),
                 )
                 .await?
-                .into_rows_result()?
+                .rows_stream::<KvRow>()?
         };
 
-        // Count rows efficiently without full deserialization
-        let count = rows
-            .rows::<KvRow>()?
-            .filter_map(|row_result| match row_result {
-                Ok(_) => Some(()),
+        // Count rows via streaming, limit to 1M
+        let mut count = 0;
+        let mut estimated = false;
+        while let Some(row_result) = rows_stream.next().await {
+            match row_result {
+                Ok(_) => {
+                    count += 1;
+                    if count >= 1_000_000 {
+                        estimated = true;
+                        break;
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(
                         target: "fastkv-server",
                         error = %e,
                         "Failed to deserialize row in count_kv"
                     );
-                    None
                 }
-            })
-            .count();
+            }
+        }
 
-        Ok(count)
+        Ok((count, estimated))
     }
 }

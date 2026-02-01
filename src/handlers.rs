@@ -3,19 +3,32 @@ use crate::models::*;
 use crate::AppState;
 
 const PROJECT_ID: &str = "fastkv-server";
+const MAX_OFFSET: usize = 100_000;
+const MAX_PREFIX_LENGTH: usize = 1000;
+const MAX_ACCOUNT_ID_LENGTH: usize = 256;
+const MAX_KEY_LENGTH: usize = 10000;
 
 /// Health check endpoint
 #[utoipa::path(
     get,
     path = "/health",
     responses(
-        (status = 200, description = "Service is healthy", body = HealthResponse)
+        (status = 200, description = "Service is healthy", body = HealthResponse),
+        (status = 503, description = "Database unavailable", body = HealthResponse)
     ),
     tag = "health"
 )]
 #[get("/health")]
-pub async fn health_check() -> Result<HttpResponse, ApiError> {
-    Ok(HttpResponse::Ok().json(HealthResponse { status: "ok" }))
+pub async fn health_check(app_state: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
+    // Try a simple query to verify DB connection
+    match app_state.scylladb.health_check().await {
+        Ok(_) => Ok(HttpResponse::Ok().json(HealthResponse {
+            status: "ok".to_string(),
+        })),
+        Err(_) => Ok(HttpResponse::ServiceUnavailable().json(HealthResponse {
+            status: "database_unavailable".to_string(),
+        })),
+    }
 }
 
 /// Get a single KV entry by exact key
@@ -35,19 +48,34 @@ pub async fn get_kv_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     // Validate required parameters
-    if query.predecessor_id.trim().is_empty() {
+    if query.predecessor_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "predecessor_id cannot be empty".to_string(),
         ));
     }
-    if query.current_account_id.trim().is_empty() {
+    if query.predecessor_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("predecessor_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.current_account_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "current_account_id cannot be empty".to_string(),
         ));
     }
-    if query.key.trim().is_empty() {
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.key.is_empty() {
         return Err(ApiError::InvalidParameter(
             "key cannot be empty".to_string(),
+        ));
+    }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("key cannot exceed {} characters", MAX_KEY_LENGTH),
         ));
     }
 
@@ -89,14 +117,24 @@ pub async fn query_kv_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     // Validate required parameters
-    if query.predecessor_id.trim().is_empty() {
+    if query.predecessor_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "predecessor_id cannot be empty".to_string(),
         ));
     }
-    if query.current_account_id.trim().is_empty() {
+    if query.predecessor_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("predecessor_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.current_account_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
         ));
     }
 
@@ -107,11 +145,23 @@ pub async fn query_kv_handler(
         ));
     }
 
+    // Validate offset
+    if query.offset > MAX_OFFSET {
+        return Err(ApiError::InvalidParameter(
+            format!("offset cannot exceed {}", MAX_OFFSET),
+        ));
+    }
+
     // Validate key_prefix is not empty if provided
     if let Some(ref prefix) = query.key_prefix {
         if prefix.is_empty() {
             return Err(ApiError::InvalidParameter(
                 "key_prefix cannot be empty string (omit parameter if not filtering)".to_string(),
+            ));
+        }
+        if prefix.len() > MAX_PREFIX_LENGTH {
+            return Err(ApiError::InvalidParameter(
+                format!("key_prefix cannot exceed {} characters", MAX_PREFIX_LENGTH),
             ));
         }
     }
@@ -161,19 +211,34 @@ pub async fn history_kv_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     // Validate required parameters
-    if query.predecessor_id.trim().is_empty() {
+    if query.predecessor_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "predecessor_id cannot be empty".to_string(),
         ));
     }
-    if query.current_account_id.trim().is_empty() {
+    if query.predecessor_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("predecessor_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.current_account_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "current_account_id cannot be empty".to_string(),
         ));
     }
-    if query.key.trim().is_empty() {
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.key.is_empty() {
         return Err(ApiError::InvalidParameter(
             "key cannot be empty".to_string(),
+        ));
+    }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("key cannot exceed {} characters", MAX_KEY_LENGTH),
         ));
     }
 
@@ -248,14 +313,24 @@ pub async fn count_kv_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     // Validate required parameters
-    if query.predecessor_id.trim().is_empty() {
+    if query.predecessor_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "predecessor_id cannot be empty".to_string(),
         ));
     }
-    if query.current_account_id.trim().is_empty() {
+    if query.predecessor_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("predecessor_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.current_account_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
         ));
     }
 
@@ -266,6 +341,11 @@ pub async fn count_kv_handler(
                 "key_prefix cannot be empty string (omit parameter if not filtering)".to_string(),
             ));
         }
+        if prefix.len() > MAX_PREFIX_LENGTH {
+            return Err(ApiError::InvalidParameter(
+                format!("key_prefix cannot exceed {} characters", MAX_PREFIX_LENGTH),
+            ));
+        }
     }
 
     tracing::info!(
@@ -273,20 +353,17 @@ pub async fn count_kv_handler(
         predecessor_id = %query.predecessor_id,
         current_account_id = %query.current_account_id,
         key_prefix = ?query.key_prefix,
-        accurate = query.accurate,
         "GET /v1/kv/count"
     );
 
-    let count = app_state
+    let (count, estimated) = app_state
         .scylladb
         .count_kv(&query)
         .await?;
 
-    // Currently always accurate (we count actual rows)
-    // In the future, could add estimation logic when accurate=false
     Ok(HttpResponse::Ok().json(CountResponse {
         count,
-        estimated: false,
+        estimated,
     }))
 }
 
@@ -307,14 +384,24 @@ pub async fn reverse_kv_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     // Validate required parameters
-    if query.current_account_id.trim().is_empty() {
+    if query.current_account_id.is_empty() {
         return Err(ApiError::InvalidParameter(
             "current_account_id cannot be empty".to_string(),
         ));
     }
-    if query.key.trim().is_empty() {
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.key.is_empty() {
         return Err(ApiError::InvalidParameter(
             "key cannot be empty".to_string(),
+        ));
+    }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("key cannot exceed {} characters", MAX_KEY_LENGTH),
         ));
     }
 
@@ -322,6 +409,13 @@ pub async fn reverse_kv_handler(
     if query.limit == 0 || query.limit > 1000 {
         return Err(ApiError::InvalidParameter(
             "limit must be between 1 and 1000".to_string(),
+        ));
+    }
+
+    // Validate offset
+    if query.offset > MAX_OFFSET {
+        return Err(ApiError::InvalidParameter(
+            format!("offset cannot exceed {}", MAX_OFFSET),
         ));
     }
 

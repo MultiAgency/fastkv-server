@@ -82,7 +82,10 @@ impl KvEntry {
             serde_json::Value::Object(map)
         } else {
             // No field filtering - return all fields
-            serde_json::to_value(self).unwrap()
+            serde_json::to_value(self).unwrap_or_else(|e| {
+                tracing::error!(target: "fastkv-server", error = %e, "Failed to serialize KvEntry");
+                serde_json::json!({"error": "serialization_failed"})
+            })
         }
     }
 }
@@ -125,7 +128,7 @@ pub struct QueryResponse {
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
-    pub status: &'static str,
+    pub status: String,
 }
 
 // Query parameter structs - aligned with official FastData protocol
@@ -249,8 +252,6 @@ pub struct CountParams {
     pub current_account_id: String,
     #[serde(default)]
     pub key_prefix: Option<String>,
-    #[serde(default)]
-    pub accurate: bool, // If true, do full scan; if false, use fast estimation
 }
 
 // Count response
@@ -292,7 +293,12 @@ impl ResponseError for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        ApiError::DatabaseError(err.to_string())
+        tracing::error!(
+            target: "fastkv-server",
+            error = %err,
+            "Database error occurred"
+        );
+        ApiError::DatabaseError("Database error occurred".to_string())
     }
 }
 

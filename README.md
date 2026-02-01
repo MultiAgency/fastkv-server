@@ -27,13 +27,23 @@ API for querying NEAR blockchain FastData key-value stores (`__fastdata_kv`) sto
 GET /health
 ```
 
-Returns a static health status. The server tests database connectivity on startup but this endpoint does not verify live database connection.
+Verifies database connectivity and returns the current status.
 
-Response:
+**Responses:**
 
-```json
-{ "status": "ok" }
-```
+- **200 OK** - Database is reachable:
+  ```json
+  { "status": "ok" }
+  ```
+
+- **503 Service Unavailable** - Database connection failed:
+  ```json
+  { "status": "database_unavailable" }
+  ```
+
+### API Documentation
+
+Interactive OpenAPI 3.0 documentation available at [https://fastdata.up.railway.app/docs](https://fastdata.up.railway.app/docs)
 
 ### Get Single Entry
 
@@ -352,7 +362,7 @@ The `exclude_null` parameter filters entries where the value field equals the st
 
 ## Tech Stack
 
-- **Rust** (nightly) + Actix-web 4.5
+- **Rust** (stable) + Actix-web 4.5
 - **ScyllaDB** - High-performance distributed database
 - **Scylla Driver** v1.4 with full serialization support
 - **Rustls 0.23** - TLS/SSL with AWS LC backend
@@ -371,11 +381,15 @@ The API is configured with the following CORS settings:
 
 **Note:** Only GET requests are allowed. POST, PUT, DELETE, and other methods will be rejected with a CORS error.
 
+## Response Compression
+
+Responses are automatically compressed using gzip, deflate, or brotli based on the client's `Accept-Encoding` header. This significantly reduces bandwidth usage, especially for large query results with many entries.
+
 ## Development
 
 ### Prerequisites
 
-- Rust (nightly recommended)
+- Rust stable (1.70+)
 - ScyllaDB instance
 
 ### Environment Variables
@@ -400,7 +414,30 @@ SCYLLA_SSL_KEY=/path/to/client-key.pem  # Client private key (for mTLS)
 
 When `SCYLLA_SSL_CA` is set, the server connects to ScyllaDB using TLS. If both `SCYLLA_SSL_CERT` and `SCYLLA_SSL_KEY` are also provided, mutual TLS (mTLS) authentication is enabled.
 
+**Optional (Advanced Configuration):**
+
+```bash
+RUST_LOG=info                           # Logging level (default: "scylladb=info,fastkv-server=info")
+                                        # Examples: "debug", "warn", "fastkv-server=debug"
+KEYSPACE=custom_keyspace                # Override keyspace (default: fastdata_{CHAIN_ID})
+TABLE_NAME=custom_table                 # Override latest values table (default: s_kv_last)
+HISTORY_TABLE_NAME=custom_history       # Override history table (default: s_kv)
+REVERSE_VIEW_NAME=custom_mv             # Override reverse lookup view (default: mv_kv_cur_key)
+```
+
 **Note:** The server uses `dotenv` to automatically load environment variables from a `.env` file in the project root for local development.
+
+### Startup Requirements
+
+The server performs validation checks at startup and will exit immediately if:
+
+- Required environment variables (`CHAIN_ID`, `SCYLLA_URL`, `SCYLLA_USERNAME`, `SCYLLA_PASSWORD`) are missing
+- `CHAIN_ID` is not a valid chain identifier
+- Cannot connect to ScyllaDB at the specified URL
+- TLS certificates (if configured) cannot be read or are invalid
+- The specified keyspace does not exist
+
+Check server logs for specific error messages if the server fails to start.
 
 ### Run Locally
 
@@ -422,7 +459,7 @@ cargo build --release
 The service includes a Dockerfile for Railway/Docker deployment:
 
 ```dockerfile
-FROM rustlang/rust:nightly AS builder
+FROM rust:latest AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release
@@ -491,6 +528,8 @@ All database queries use ScyllaDB consistency level `LocalOne`, which prioritize
 - **Trade-off:** May not reflect the very latest writes from other datacenters
 
 For most use cases, this provides an optimal balance of performance and consistency.
+
+**Query Timeout:** All queries have a 10-second timeout. Queries that exceed this limit will fail with a database error.
 
 ## Related Repositories
 
