@@ -34,6 +34,18 @@ pub struct KvHistoryRow {
     pub action_index: i32,
 }
 
+// Lightweight row for keys-only queries (avoids fetching value and metadata)
+#[derive(DeserializeRow, Debug, Clone)]
+pub struct KvKeyRow {
+    pub key: String,
+}
+
+// Lightweight row for predecessor-only queries
+#[derive(DeserializeRow, Debug, Clone)]
+pub struct KvPredecessorRow {
+    pub predecessor_id: String,
+}
+
 // API response - keeps NEAR/FastData field names for compatibility
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct KvEntry {
@@ -252,6 +264,50 @@ fn default_order_desc() -> String {
     "desc".to_string()
 }
 
+// Keys query parameters (list keys without values)
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct KeysParams {
+    pub predecessor_id: String,
+    pub current_account_id: String,
+    #[serde(default)]
+    pub key_prefix: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct KeysResponse {
+    pub keys: Vec<String>,
+}
+
+// Accounts query parameters (list unique predecessors for a current_account_id + key pattern)
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct AccountsParams {
+    pub current_account_id: String,
+    pub key: String,
+    #[serde(default)]
+    pub exclude_null: Option<bool>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct AccountsResponse {
+    pub accounts: Vec<String>,
+    pub count: usize,
+}
+
+// Accounts count query parameters
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct AccountsCountParams {
+    pub current_account_id: String,
+    pub key: String,
+}
+
 // By-key query parameters (reverse lookup by exact key across all predecessors)
 #[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct ByKeyParams {
@@ -310,6 +366,157 @@ pub struct BatchResultItem {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct BatchResponse {
     pub results: Vec<BatchResultItem>,
+}
+
+// ===== Social API types =====
+
+// POST /v1/social/get request body
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SocialGetBody {
+    pub keys: Vec<String>,
+    #[serde(default)]
+    pub options: Option<SocialGetOptions>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SocialGetOptions {
+    #[serde(default)]
+    pub with_block_height: Option<bool>,
+    #[serde(default)]
+    pub return_deleted: Option<bool>,
+}
+
+// POST /v1/social/keys request body
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SocialKeysBody {
+    pub keys: Vec<String>,
+    #[serde(default)]
+    pub options: Option<SocialKeysOptions>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SocialKeysOptions {
+    #[serde(default)]
+    pub return_type: Option<String>, // "True" | "BlockHeight"
+    #[serde(default)]
+    pub return_deleted: Option<bool>,
+    #[serde(default)]
+    pub values_only: Option<bool>,
+}
+
+// GET /v1/social/index query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialIndexParams {
+    pub action: String,
+    pub key: String,
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub from: Option<u64>, // block_height cursor
+}
+
+// GET /v1/social/profile query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialProfileParams {
+    #[serde(alias = "accountId")]
+    pub account_id: String,
+}
+
+// GET /v1/social/followers and /v1/social/following query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialFollowParams {
+    #[serde(alias = "accountId")]
+    pub account_id: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+// GET /v1/social/likes, /comments, /reposts query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialItemParams {
+    pub path: String,
+    #[serde(alias = "blockHeight")]
+    pub block_height: u64,
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+// GET /v1/social/feed/account query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialAccountFeedParams {
+    #[serde(alias = "accountId")]
+    pub account_id: String,
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub from: Option<u64>,
+}
+
+// GET /v1/social/feed/hashtag query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialHashtagFeedParams {
+    pub hashtag: String,
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+// GET /v1/social/feed/activity query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialActivityFeedParams {
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+// GET /v1/social/notifications query params
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct SocialNotificationsParams {
+    #[serde(alias = "accountId")]
+    pub account_id: String,
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub from: Option<u64>,
+}
+
+// Social API response types
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct IndexEntry {
+    #[serde(rename = "accountId")]
+    pub account_id: String,
+    #[serde(rename = "blockHeight")]
+    pub block_height: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct IndexResponse {
+    pub entries: Vec<IndexEntry>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SocialFollowResponse {
+    pub accounts: Vec<String>,
+    pub count: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SocialFeedResponse {
+    pub posts: Vec<IndexEntry>,
 }
 
 // Error handling

@@ -466,6 +466,203 @@ pub async fn reverse_kv_handler(
     }
 }
 
+/// List keys without values for a given predecessor and account
+#[utoipa::path(
+    get,
+    path = "/v1/kv/keys",
+    params(KeysParams),
+    responses(
+        (status = 200, description = "List of key names", body = KeysResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/keys")]
+pub async fn keys_handler(
+    query: web::Query<KeysParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    if query.predecessor_id.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "predecessor_id cannot be empty".to_string(),
+        ));
+    }
+    if query.predecessor_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("predecessor_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.current_account_id.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.limit == 0 || query.limit > 1000 {
+        return Err(ApiError::InvalidParameter(
+            "limit must be between 1 and 1000".to_string(),
+        ));
+    }
+    if query.offset > MAX_OFFSET {
+        return Err(ApiError::InvalidParameter(
+            format!("offset cannot exceed {}", MAX_OFFSET),
+        ));
+    }
+    if let Some(ref prefix) = query.key_prefix {
+        if prefix.is_empty() {
+            return Err(ApiError::InvalidParameter(
+                "key_prefix cannot be empty string (omit parameter if not filtering)".to_string(),
+            ));
+        }
+        if prefix.len() > MAX_PREFIX_LENGTH {
+            return Err(ApiError::InvalidParameter(
+                format!("key_prefix cannot exceed {} characters", MAX_PREFIX_LENGTH),
+            ));
+        }
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        predecessor_id = %query.predecessor_id,
+        current_account_id = %query.current_account_id,
+        key_prefix = ?query.key_prefix,
+        limit = query.limit,
+        offset = query.offset,
+        "GET /v1/kv/keys"
+    );
+
+    let keys = app_state
+        .scylladb
+        .query_keys(&query)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(KeysResponse { keys }))
+}
+
+/// List unique predecessor accounts that wrote a specific key to a given account
+#[utoipa::path(
+    get,
+    path = "/v1/kv/accounts",
+    params(AccountsParams),
+    responses(
+        (status = 200, description = "List of unique predecessor accounts", body = AccountsResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/accounts")]
+pub async fn accounts_handler(
+    query: web::Query<AccountsParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    if query.current_account_id.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.key.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "key cannot be empty".to_string(),
+        ));
+    }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("key cannot exceed {} characters", MAX_KEY_LENGTH),
+        ));
+    }
+    if query.limit == 0 || query.limit > 1000 {
+        return Err(ApiError::InvalidParameter(
+            "limit must be between 1 and 1000".to_string(),
+        ));
+    }
+    if query.offset > MAX_OFFSET {
+        return Err(ApiError::InvalidParameter(
+            format!("offset cannot exceed {}", MAX_OFFSET),
+        ));
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        current_account_id = %query.current_account_id,
+        key = %query.key,
+        limit = query.limit,
+        offset = query.offset,
+        "GET /v1/kv/accounts"
+    );
+
+    let accounts = app_state
+        .scylladb
+        .query_accounts(&query)
+        .await?;
+
+    let count = accounts.len();
+    Ok(HttpResponse::Ok().json(AccountsResponse { accounts, count }))
+}
+
+/// Count unique predecessor accounts that wrote a specific key to a given account
+#[utoipa::path(
+    get,
+    path = "/v1/kv/accounts/count",
+    params(AccountsCountParams),
+    responses(
+        (status = 200, description = "Count of unique predecessor accounts", body = CountResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/accounts/count")]
+pub async fn accounts_count_handler(
+    query: web::Query<AccountsCountParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    if query.current_account_id.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "current_account_id cannot be empty".to_string(),
+        ));
+    }
+    if query.current_account_id.len() > MAX_ACCOUNT_ID_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("current_account_id cannot exceed {} characters", MAX_ACCOUNT_ID_LENGTH),
+        ));
+    }
+    if query.key.is_empty() {
+        return Err(ApiError::InvalidParameter(
+            "key cannot be empty".to_string(),
+        ));
+    }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(
+            format!("key cannot exceed {} characters", MAX_KEY_LENGTH),
+        ));
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        current_account_id = %query.current_account_id,
+        key = %query.key,
+        "GET /v1/kv/accounts/count"
+    );
+
+    let count = app_state
+        .scylladb
+        .count_accounts(&query.current_account_id, &query.key)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(CountResponse {
+        count,
+        estimated: count >= 1_000_000,
+    }))
+}
+
 /// Lookup by exact key: find all predecessors who wrote to a specific key for a given account
 #[utoipa::path(
     get,

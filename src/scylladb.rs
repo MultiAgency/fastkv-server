@@ -2,7 +2,7 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 
-use crate::models::{ByKeyParams, CountParams, HistoryParams, KvEntry, KvHistoryRow, KvRow, QueryParams, ReverseParams};
+use crate::models::{AccountsParams, ByKeyParams, CountParams, HistoryParams, KeysParams, KvEntry, KvHistoryRow, KvKeyRow, KvPredecessorRow, KvRow, QueryParams, ReverseParams};
 use crate::queries::build_prefix_query;
 use fastnear_primitives::types::ChainId;
 use rustls::pki_types::pem::PemObject;
@@ -16,9 +16,11 @@ pub struct ScyllaDb {
     get_kv: PreparedStatement,
     get_kv_last: PreparedStatement,
     query_kv_no_prefix: PreparedStatement,
-    reverse_kv: PreparedStatement,
+    pub(crate) reverse_kv: PreparedStatement,
     get_kv_history: PreparedStatement,
     by_key: PreparedStatement,
+    query_keys_no_prefix: PreparedStatement,
+    accounts_by_key: PreparedStatement,
 
     pub scylla_session: Session,
     pub table_name: String,
@@ -162,6 +164,16 @@ impl ScyllaDb {
                 &format!("SELECT {} FROM {} WHERE key = ?", columns, by_key_view_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
+            query_keys_no_prefix: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT key FROM {} WHERE predecessor_id = ? AND current_account_id = ?", table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            accounts_by_key: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT predecessor_id FROM {} WHERE current_account_id = ? AND key = ?", reverse_view_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
             scylla_session,
             table_name,
             history_table_name,
@@ -278,6 +290,160 @@ impl ScyllaDb {
         }
 
         Ok(entries)
+    }
+
+    pub async fn query_keys(
+        &self,
+        params: &KeysParams,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut rows_stream = if let Some(prefix) = &params.key_prefix {
+            let prefix_start = prefix.to_string();
+            let prefix_end = format!("{}\u{ff}", prefix);
+            let query_text = format!(
+                "SELECT key FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key >= ? AND key < ?",
+                self.table_name
+            );
+            let mut stmt = scylla::statement::Statement::new(query_text);
+            stmt.set_consistency(scylla::frame::types::Consistency::LocalOne);
+            stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
+
+            self.scylla_session
+                .query_iter(
+                    stmt,
+                    (&params.predecessor_id, &params.current_account_id, &prefix_start, &prefix_end),
+                )
+                .await?
+                .rows_stream::<KvKeyRow>()?
+        } else {
+            self.scylla_session
+                .execute_iter(
+                    self.query_keys_no_prefix.clone(),
+                    (&params.predecessor_id, &params.current_account_id),
+                )
+                .await?
+                .rows_stream::<KvKeyRow>()?
+        };
+
+        let mut skipped = 0;
+        let mut keys = Vec::with_capacity(params.limit);
+
+        while let Some(row_result) = rows_stream.next().await {
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in query_keys"
+                    );
+                    continue;
+                }
+            };
+
+            if skipped < params.offset {
+                skipped += 1;
+                continue;
+            }
+
+            keys.push(row.key);
+            if keys.len() >= params.limit {
+                break;
+            }
+        }
+
+        Ok(keys)
+    }
+
+    pub async fn query_accounts(
+        &self,
+        params: &AccountsParams,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut rows_stream = self
+            .scylla_session
+            .execute_iter(
+                self.accounts_by_key.clone(),
+                (&params.current_account_id, &params.key),
+            )
+            .await?
+            .rows_stream::<KvPredecessorRow>()?;
+
+        let mut seen = HashSet::new();
+        let mut accounts = Vec::new();
+        let target_count = params.offset + params.limit;
+
+        while let Some(row_result) = rows_stream.next().await {
+            if seen.len() >= 100_000 {
+                break;
+            }
+
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in query_accounts"
+                    );
+                    continue;
+                }
+            };
+
+            if seen.contains(&row.predecessor_id) {
+                continue;
+            }
+            seen.insert(row.predecessor_id.clone());
+            accounts.push(row.predecessor_id);
+
+            if accounts.len() >= target_count {
+                break;
+            }
+        }
+
+        let result: Vec<String> = accounts
+            .into_iter()
+            .skip(params.offset)
+            .take(params.limit)
+            .collect();
+
+        Ok(result)
+    }
+
+    pub async fn count_accounts(
+        &self,
+        current_account_id: &str,
+        key: &str,
+    ) -> anyhow::Result<usize> {
+        let mut rows_stream = self
+            .scylla_session
+            .execute_iter(
+                self.accounts_by_key.clone(),
+                (current_account_id, key),
+            )
+            .await?
+            .rows_stream::<KvPredecessorRow>()?;
+
+        let mut seen = HashSet::new();
+
+        while let Some(row_result) = rows_stream.next().await {
+            if seen.len() >= 1_000_000 {
+                break;
+            }
+
+            match row_result {
+                Ok(row) => {
+                    seen.insert(row.predecessor_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in count_accounts"
+                    );
+                }
+            }
+        }
+
+        Ok(seen.len())
     }
 
     pub async fn query_kv_with_pagination(
