@@ -495,25 +495,24 @@ impl ScyllaDb {
         key: &str,
         block_height: i64,
     ) -> anyhow::Result<Option<KvEntry>> {
-        let mut rows_stream = self
+        let result = self
             .scylla_session
-            .execute_iter(
-                self.get_kv_at_block.clone(),
+            .execute_unpaged(
+                &self.get_kv_at_block,
                 (predecessor_id, current_account_id, key, block_height),
             )
             .await?
-            .rows_stream::<KvHistoryRow>()?;
+            .into_rows_result()?;
 
-        let mut last: Option<KvEntry> = None;
-        while let Some(row_result) = rows_stream.next().await {
-            match row_result {
-                Ok(row) => last = Some(KvEntry::from(row)),
-                Err(e) => {
-                    tracing::warn!(target: "fastkv-server", error = %e, "Failed to deserialize row in get_kv_at_block");
-                }
-            }
-        }
-        Ok(last)
+        // Multiple rows can exist per block_height (different order_id values);
+        // .last() takes the highest order_id since clustering order is ASC.
+        let entry = result
+            .rows::<KvHistoryRow>()?
+            .filter_map(|r| r.ok())
+            .last()
+            .map(KvEntry::from);
+
+        Ok(entry)
     }
 
     pub async fn get_kv_timeline(

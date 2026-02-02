@@ -5,7 +5,7 @@ mod scylladb;
 mod social_handlers;
 mod tree;
 
-use crate::handlers::{batch_kv_handler, by_key_handler, diff_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler, timeline_kv_handler};
+use crate::handlers::{batch_kv_handler, by_key_handler, diff_kv_handler, get_kv_handler, health_check, history_kv_handler, index, query_kv_handler, reverse_kv_handler, timeline_kv_handler};
 use crate::social_handlers::{
     social_get_handler, social_keys_handler, social_index_handler,
     social_profile_handler, social_followers_handler, social_following_handler,
@@ -148,6 +148,7 @@ async fn main() -> std::io::Result<()> {
             ))
             .wrap(tracing_actix_web::TracingLogger::default())
             .service(Scalar::with_url("/docs", ApiDoc::openapi()))
+            .service(index)
             .service(health_check)
             .service(get_kv_handler)
             .service(query_kv_handler)

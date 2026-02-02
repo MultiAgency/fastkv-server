@@ -766,6 +766,15 @@ pub async fn social_account_feed_handler(
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, "GET /v1/social/feed/account");
 
+    let from_block = query.from.map(|f| i64::try_from(f).unwrap_or(i64::MAX));
+    let include_replies = query.include_replies.unwrap_or(false);
+
+    let to_index_entry = |e: KvEntry| IndexEntry {
+        account_id: e.predecessor_id,
+        block_height: e.block_height,
+        value: serde_json::from_str(&e.value).ok(),
+    };
+
     // Query history for post/main key to get all posts with their block heights
     let history_params = HistoryParams {
         predecessor_id: query.account_id.clone(),
@@ -773,49 +782,45 @@ pub async fn social_account_feed_handler(
         key: "post/main".to_string(),
         limit: query.limit,
         order: query.order.clone(),
-        from_block: query.from.map(|f| f as i64),
+        from_block,
         to_block: None,
         fields: None,
     };
 
-    let entries = app_state.scylladb.get_kv_history(&history_params).await?;
+    let comment_params = HistoryParams {
+        predecessor_id: query.account_id.clone(),
+        current_account_id: contract.to_string(),
+        key: "post/comment".to_string(),
+        limit: query.limit,
+        order: query.order.clone(),
+        from_block,
+        to_block: None,
+        fields: None,
+    };
 
-    let mut posts: Vec<IndexEntry> = entries.into_iter()
-        .map(|e| IndexEntry {
-            account_id: e.predecessor_id,
-            block_height: e.block_height,
-            value: serde_json::from_str(&e.value).ok(),
-        })
-        .collect();
+    let posts: Vec<IndexEntry> = if include_replies {
+        let (entries, comment_entries) = futures::future::try_join(
+            app_state.scylladb.get_kv_history(&history_params),
+            app_state.scylladb.get_kv_history(&comment_params),
+        ).await?;
 
-    if query.include_replies.unwrap_or(false) {
-        let comment_params = HistoryParams {
-            predecessor_id: query.account_id.clone(),
-            current_account_id: contract.to_string(),
-            key: "post/comment".to_string(),
-            limit: query.limit,
-            order: query.order.clone(),
-            from_block: query.from.map(|f| f as i64),
-            to_block: None,
-            fields: None,
-        };
-
-        let comment_entries = app_state.scylladb.get_kv_history(&comment_params).await?;
-
-        posts.extend(comment_entries.into_iter().map(|e| IndexEntry {
-            account_id: e.predecessor_id,
-            block_height: e.block_height,
-            value: serde_json::from_str(&e.value).ok(),
-        }));
+        let mut combined: Vec<IndexEntry> = entries.into_iter()
+            .chain(comment_entries.into_iter())
+            .map(to_index_entry)
+            .collect();
 
         if query.order == "asc" {
-            posts.sort_by_key(|e| e.block_height);
+            combined.sort_by_key(|e| e.block_height);
         } else {
-            posts.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+            combined.sort_by(|a, b| b.block_height.cmp(&a.block_height));
         }
 
-        posts.truncate(query.limit);
-    }
+        combined.truncate(query.limit);
+        combined
+    } else {
+        app_state.scylladb.get_kv_history(&history_params).await?
+            .into_iter().map(to_index_entry).collect()
+    };
 
     Ok(HttpResponse::Ok().json(SocialFeedResponse { posts }))
 }

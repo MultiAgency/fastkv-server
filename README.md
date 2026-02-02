@@ -17,7 +17,8 @@ API for querying NEAR blockchain FastData key-value stores (`__fastdata_kv`) sto
 - **Field Selection** - Request only specific fields to reduce bandwidth (e.g., `fields=key,value`)
 - **Prefix Queries** - Efficient tree traversal for SocialDB-style hierarchical data
 - **Reverse Lookups** - Find all accounts with a specific key
-- **Count Queries** - Get entry counts without fetching data
+- **Diff** - Compare a key's value at two different block heights
+- **Timeline** - All writes by one account across all keys
 
 ## Endpoints
 
@@ -148,52 +149,9 @@ curl "https://fastdata.up.railway.app/v1/kv/history?predecessor_id=james.near&cu
 - Audit trail for social graph changes
 - Time-series analysis of on-chain data
 
-### Count Entries
+### All Endpoints
 
-```
-GET /v1/kv/count?predecessor_id={account}&current_account_id={contract}&key_prefix={prefix}
-```
-
-Returns the count of entries matching the query without transferring the actual data. Essential for displaying counts in UIs (e.g., "42 followers").
-
-| Parameter            | Description                                                                                     |
-| -------------------- | ----------------------------------------------------------------------------------------------- |
-| `predecessor_id`     | The account that wrote the data                                                                 |
-| `current_account_id` | The contract called                                                                             |
-| `key_prefix`         | Optional prefix filter (e.g., `graph/follow/`). Cannot be empty string - omit if not filtering. |
-| `accurate`           | If `true`, counts actual rows (default: `false`, currently both modes count actual rows)        |
-
-**Response:**
-
-```json
-{
-  "count": 42,
-  "estimated": false
-}
-```
-
-**Example - Count followers:**
-
-```bash
-curl "https://fastdata.up.railway.app/v1/kv/count?predecessor_id=james.near&current_account_id=social.near&key_prefix=graph/follow/"
-```
-
-**Response:**
-
-```json
-{
-  "count": 42,
-  "estimated": false
-}
-```
-
-**Use Cases:**
-- Display follower/following counts without loading all entries
-- Show "X posts", "Y comments" in UIs
-- Calculate tree size for SocialDB hierarchies
-- Pagination metadata ("Showing 1-10 of 42")
-
-**Note:** Currently performs accurate row counting. The `estimated` field is always `false`. Future optimization may add fast estimation mode.
+Full interactive documentation for all 16 endpoints (8 KV + health + 7 Social) is available at [/docs](https://fastdata.up.railway.app/docs). The most common endpoints are documented below.
 
 ### Query Multiple Entries
 
