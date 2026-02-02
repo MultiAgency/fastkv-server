@@ -2,7 +2,7 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 
-use crate::models::{AccountsParams, ByKeyParams, HistoryParams, KvEntry, KvHistoryRow, KvPredecessorRow, KvRow, QueryParams, ReverseParams, MAX_DEDUP_SCAN, MAX_HISTORY_SCAN};
+use crate::models::{AccountsParams, ByKeyParams, HistoryParams, KvEntry, KvHistoryRow, KvPredecessorRow, KvRow, QueryParams, ReverseParams, TimelineParams, MAX_DEDUP_SCAN, MAX_HISTORY_SCAN};
 use crate::queries::build_prefix_query;
 use fastnear_primitives::types::ChainId;
 use rustls::pki_types::pem::PemObject;
@@ -18,6 +18,8 @@ pub struct ScyllaDb {
     query_kv_no_prefix: PreparedStatement,
     pub(crate) reverse_kv: PreparedStatement,
     get_kv_history: PreparedStatement,
+    get_kv_at_block: PreparedStatement,
+    get_kv_timeline: PreparedStatement,
     by_key: PreparedStatement,
     accounts_by_key: PreparedStatement,
 
@@ -156,6 +158,16 @@ impl ScyllaDb {
             get_kv_history: Self::prepare_query(
                 &scylla_session,
                 &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key = ?", history_columns, history_table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            get_kv_at_block: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key = ? AND block_height = ?", history_columns, history_table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            get_kv_timeline: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ?", history_columns, history_table_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
             by_key: Self::prepare_query(
@@ -467,6 +479,97 @@ impl ScyllaDb {
         }
 
         // Apply offset and limit
+        let result: Vec<KvEntry> = entries
+            .into_iter()
+            .skip(params.offset)
+            .take(params.limit)
+            .collect();
+
+        Ok(result)
+    }
+
+    pub async fn get_kv_at_block(
+        &self,
+        predecessor_id: &str,
+        current_account_id: &str,
+        key: &str,
+        block_height: i64,
+    ) -> anyhow::Result<Option<KvEntry>> {
+        let mut rows_stream = self
+            .scylla_session
+            .execute_iter(
+                self.get_kv_at_block.clone(),
+                (predecessor_id, current_account_id, key, block_height),
+            )
+            .await?
+            .rows_stream::<KvHistoryRow>()?;
+
+        let mut last: Option<KvEntry> = None;
+        while let Some(row_result) = rows_stream.next().await {
+            match row_result {
+                Ok(row) => last = Some(KvEntry::from(row)),
+                Err(e) => {
+                    tracing::warn!(target: "fastkv-server", error = %e, "Failed to deserialize row in get_kv_at_block");
+                }
+            }
+        }
+        Ok(last)
+    }
+
+    pub async fn get_kv_timeline(
+        &self,
+        params: &TimelineParams,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let mut rows_stream = self
+            .scylla_session
+            .execute_iter(
+                self.get_kv_timeline.clone(),
+                (&params.predecessor_id, &params.current_account_id),
+            )
+            .await?
+            .rows_stream::<KvHistoryRow>()?;
+
+        let mut entries: Vec<KvEntry> = Vec::new();
+        let mut scanned = 0usize;
+
+        while let Some(row_result) = rows_stream.next().await {
+            scanned += 1;
+            if scanned > MAX_HISTORY_SCAN {
+                break;
+            }
+
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::warn!(target: "fastkv-server", error = %e, "Failed to deserialize row in get_kv_timeline");
+                    continue;
+                }
+            };
+
+            let entry = KvEntry::from(row);
+
+            if let Some(from_block) = params.from_block {
+                if (entry.block_height as i64) < from_block {
+                    continue;
+                }
+            }
+            if let Some(to_block) = params.to_block {
+                if (entry.block_height as i64) > to_block {
+                    continue;
+                }
+            }
+
+            entries.push(entry);
+        }
+
+        entries.sort_by(|a, b| {
+            if params.order.to_lowercase() == "asc" {
+                a.block_height.cmp(&b.block_height)
+            } else {
+                b.block_height.cmp(&a.block_height)
+            }
+        });
+
         let result: Vec<KvEntry> = entries
             .into_iter()
             .skip(params.offset)

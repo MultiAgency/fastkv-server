@@ -327,6 +327,113 @@ pub async fn by_key_handler(
     Ok(respond_with_entries(entries, &fields))
 }
 
+/// Compare a key's value at two different block heights
+#[utoipa::path(
+    get,
+    path = "/v1/kv/diff",
+    params(DiffParams),
+    responses(
+        (status = 200, description = "Values at both block heights", body = DiffResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/diff")]
+pub async fn diff_kv_handler(
+    query: web::Query<DiffParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    validate_account_id(&query.predecessor_id, "predecessor_id")?;
+    validate_account_id(&query.current_account_id, "current_account_id")?;
+    validate_key(&query.key, "key", MAX_KEY_LENGTH)?;
+
+    tracing::info!(
+        target: PROJECT_ID,
+        predecessor_id = %query.predecessor_id,
+        current_account_id = %query.current_account_id,
+        key = %query.key,
+        block_height_a = query.block_height_a,
+        block_height_b = query.block_height_b,
+        "GET /v1/kv/diff"
+    );
+
+    let (a, b) = futures::future::try_join(
+        app_state.scylladb.get_kv_at_block(
+            &query.predecessor_id, &query.current_account_id, &query.key, query.block_height_a,
+        ),
+        app_state.scylladb.get_kv_at_block(
+            &query.predecessor_id, &query.current_account_id, &query.key, query.block_height_b,
+        ),
+    ).await?;
+
+    let fields = parse_field_set(&query.fields);
+    if fields.is_some() {
+        Ok(HttpResponse::Ok().json(serde_json::json!({
+            "a": a.as_ref().map(|e| e.to_json_with_fields(&fields)),
+            "b": b.as_ref().map(|e| e.to_json_with_fields(&fields)),
+        })))
+    } else {
+        Ok(HttpResponse::Ok().json(DiffResponse { a, b }))
+    }
+}
+
+/// All writes by one account across all keys, ordered by block_height
+#[utoipa::path(
+    get,
+    path = "/v1/kv/timeline",
+    params(TimelineParams),
+    responses(
+        (status = 200, description = "Chronological list of all writes", body = QueryResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError)
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/timeline")]
+pub async fn timeline_kv_handler(
+    query: web::Query<TimelineParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    validate_account_id(&query.predecessor_id, "predecessor_id")?;
+    validate_account_id(&query.current_account_id, "current_account_id")?;
+    validate_limit(query.limit)?;
+    validate_offset(query.offset)?;
+
+    let order_lower = query.order.to_lowercase();
+    if order_lower != "asc" && order_lower != "desc" {
+        return Err(ApiError::InvalidParameter(
+            "order must be 'asc' or 'desc'".to_string(),
+        ));
+    }
+
+    if let (Some(from), Some(to)) = (query.from_block, query.to_block) {
+        if from > to {
+            return Err(ApiError::InvalidParameter(
+                "from_block must be less than or equal to to_block".to_string(),
+            ));
+        }
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        predecessor_id = %query.predecessor_id,
+        current_account_id = %query.current_account_id,
+        limit = query.limit,
+        offset = query.offset,
+        order = %query.order,
+        from_block = ?query.from_block,
+        to_block = ?query.to_block,
+        "GET /v1/kv/timeline"
+    );
+
+    let entries = app_state
+        .scylladb
+        .get_kv_timeline(&query)
+        .await?;
+
+    let fields = parse_field_set(&query.fields);
+    Ok(respond_with_entries(entries, &fields))
+}
+
 /// Batch lookup: get values for multiple keys in a single request
 #[utoipa::path(
     post,
@@ -401,90 +508,3 @@ pub async fn batch_kv_handler(
     Ok(HttpResponse::Ok().json(BatchResponse { results: items }))
 }
 
-/// Commit KV data to NEAR blockchain
-#[utoipa::path(
-    post,
-    path = "/v1/kv/commit",
-    request_body = CommitRequest,
-    responses(
-        (status = 200, description = "Successfully committed to NEAR", body = CommitResponse),
-        (status = 400, description = "Invalid parameters", body = ApiError),
-        (status = 502, description = "NEAR transaction failed", body = ApiError),
-        (status = 504, description = "Transaction timed out — check chain before retrying", body = ApiError)
-    ),
-    tag = "kv"
-)]
-#[post("/v1/kv/commit")]
-pub async fn commit_kv_handler(
-    body: web::Json<CommitRequest>,
-    app_state: web::Data<AppState>,
-) -> Result<HttpResponse, ApiError> {
-    let near_client = app_state.near_client.as_ref().ok_or_else(|| {
-        ApiError::TransactionError("NEAR client not configured".to_string())
-    })?;
-
-    if body.keys.is_empty() {
-        return Err(ApiError::InvalidParameter("keys cannot be empty".to_string()));
-    }
-    if body.keys.len() > MAX_COMMIT_KEYS {
-        return Err(ApiError::InvalidParameter(
-            format!("keys cannot exceed {} items", MAX_COMMIT_KEYS),
-        ));
-    }
-
-    for ck in &body.keys {
-        validate_account_id(&ck.predecessor_id, "predecessor_id")?;
-        validate_account_id(&ck.current_account_id, "current_account_id")?;
-        validate_key(&ck.key, "key", MAX_KEY_LENGTH)?;
-    }
-
-    tracing::info!(target: PROJECT_ID, key_count = body.keys.len(), "POST /v1/kv/commit");
-
-    let fetch_futures: Vec<_> = body.keys.iter().map(|ck| {
-        let scylladb = app_state.scylladb.clone();
-        let predecessor_id = ck.predecessor_id.clone();
-        let current_account_id = ck.current_account_id.clone();
-        let key = ck.key.clone();
-        async move {
-            let value = scylladb
-                .get_kv_last(&predecessor_id, &current_account_id, &key)
-                .await
-                .map_err(|e| ApiError::DatabaseError(format!("Failed to fetch key '{}': {}", key, e)))?;
-            match value {
-                Some(v) => Ok((key, v)),
-                None => Err(ApiError::InvalidParameter(format!("key '{}' not found", key))),
-            }
-        }
-    }).collect();
-
-    let results = futures::future::join_all(fetch_futures).await;
-    let mut kv_pairs = Vec::with_capacity(results.len());
-    for result in results {
-        kv_pairs.push(result?);
-    }
-
-    let num_keys = kv_pairs.len();
-    let near_timeout = std::time::Duration::from_secs(30);
-    let tx_result = actix_web::rt::time::timeout(near_timeout, near_client.commit_batch(kv_pairs)).await;
-
-    let tx_hash = match tx_result {
-        Ok(Ok(hash)) => hash,
-        Ok(Err(e)) => {
-            tracing::error!(target: PROJECT_ID, error = %e, "NEAR transaction failed");
-            return Err(ApiError::TransactionError(e.to_string()));
-        }
-        Err(_) => {
-            tracing::error!(target: PROJECT_ID, "NEAR transaction timed out — tx may still land on-chain");
-            return Err(ApiError::TransactionTimeout(
-                "Transaction timed out after 30s — check chain before retrying".to_string(),
-            ));
-        }
-    };
-
-    tracing::info!(target: PROJECT_ID, tx_hash = %tx_hash, keys = num_keys, "Committed to NEAR");
-
-    Ok(HttpResponse::Ok().json(CommitResponse {
-        transaction_hash: tx_hash,
-        keys_committed: num_keys,
-    }))
-}

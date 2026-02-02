@@ -10,7 +10,6 @@ pub const MAX_ACCOUNT_ID_LENGTH: usize = 256;
 pub const MAX_KEY_LENGTH: usize = 10000;
 pub const MAX_BATCH_KEYS: usize = 100;
 pub const MAX_BATCH_KEY_LENGTH: usize = 1024;
-pub const MAX_COMMIT_KEYS: usize = 50;
 pub const MAX_SOCIAL_RESULTS: usize = 1000;
 pub const MAX_SOCIAL_KEYS: usize = 100;
 pub const MAX_STREAM_ERRORS: usize = 10;
@@ -284,6 +283,43 @@ pub struct ByKeyParams {
 }
 
 
+// Diff query parameters
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct DiffParams {
+    pub predecessor_id: String,
+    pub current_account_id: String,
+    pub key: String,
+    pub block_height_a: i64,
+    pub block_height_b: i64,
+    #[serde(default)]
+    pub fields: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct DiffResponse {
+    pub a: Option<KvEntry>,
+    pub b: Option<KvEntry>,
+}
+
+// Timeline query parameters
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct TimelineParams {
+    pub predecessor_id: String,
+    pub current_account_id: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_order_desc")]
+    pub order: String,
+    #[serde(default)]
+    pub from_block: Option<i64>,
+    #[serde(default)]
+    pub to_block: Option<i64>,
+    #[serde(default)]
+    pub fields: Option<String>,
+}
+
 // Batch query structs
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct BatchQuery {
@@ -360,6 +396,9 @@ pub struct SocialIndexParams {
     #[serde(default)]
     pub from: Option<u64>, // block_height cursor
     #[serde(default)]
+    #[serde(alias = "accountId")]
+    pub account_id: Option<String>,
+    #[serde(default)]
     pub contract_id: Option<String>,
 }
 
@@ -397,6 +436,8 @@ pub struct SocialAccountFeedParams {
     #[serde(default)]
     pub from: Option<u64>,
     #[serde(default)]
+    pub include_replies: Option<bool>,
+    #[serde(default)]
     pub contract_id: Option<String>,
 }
 
@@ -433,8 +474,6 @@ pub struct SocialFeedResponse {
 pub enum ApiError {
     InvalidParameter(String),
     DatabaseError(String),
-    TransactionError(String),
-    TransactionTimeout(String),
 }
 
 impl fmt::Display for ApiError {
@@ -442,8 +481,6 @@ impl fmt::Display for ApiError {
         match self {
             ApiError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
             ApiError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
-            ApiError::TransactionError(msg) => write!(f, "Transaction error: {}", msg),
-            ApiError::TransactionTimeout(msg) => write!(f, "Transaction timeout: {}", msg),
         }
     }
 }
@@ -453,8 +490,6 @@ impl ResponseError for ApiError {
         let status = match self {
             ApiError::InvalidParameter(_) => StatusCode::BAD_REQUEST,
             ApiError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::TransactionError(_) => StatusCode::BAD_GATEWAY,
-            ApiError::TransactionTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
         };
 
         HttpResponse::build(status).json(serde_json::json!({
@@ -472,25 +507,6 @@ impl From<anyhow::Error> for ApiError {
         );
         ApiError::DatabaseError(err.to_string())
     }
-}
-
-// Commit endpoint types
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct CommitRequest {
-    pub keys: Vec<CommitKey>,
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct CommitKey {
-    pub predecessor_id: String,
-    pub current_account_id: String,
-    pub key: String,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct CommitResponse {
-    pub transaction_hash: String,
-    pub keys_committed: usize,
 }
 
 #[cfg(test)]

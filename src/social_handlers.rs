@@ -104,6 +104,7 @@ async fn query_index(
     order: &str,
     limit: usize,
     from: Option<u64>,
+    account_id: Option<&str>,
 ) -> Result<Vec<IndexEntry>, ApiError> {
     let index_key = format!("index/{}/{}", action, key);
 
@@ -148,6 +149,13 @@ async fn query_index(
                         continue;
                     }
                     if order == "asc" && block_height <= from_block {
+                        continue;
+                    }
+                }
+
+                // Apply account_id filter
+                if let Some(aid) = account_id {
+                    if row.predecessor_id != aid {
                         continue;
                     }
                 }
@@ -593,7 +601,7 @@ pub async fn social_index_handler(
 
     tracing::info!(target: PROJECT_ID, action = %query.action, key = %query.key, contract_id = %contract, "GET /v1/social/index");
 
-    let entries = query_index(&app_state, contract, &query.action, &query.key, &query.order, query.limit, query.from).await?;
+    let entries = query_index(&app_state, contract, &query.action, &query.key, &query.order, query.limit, query.from, query.account_id.as_deref()).await?;
 
     Ok(HttpResponse::Ok().json(IndexResponse { entries }))
 }
@@ -772,13 +780,42 @@ pub async fn social_account_feed_handler(
 
     let entries = app_state.scylladb.get_kv_history(&history_params).await?;
 
-    let posts: Vec<IndexEntry> = entries.into_iter()
+    let mut posts: Vec<IndexEntry> = entries.into_iter()
         .map(|e| IndexEntry {
             account_id: e.predecessor_id,
             block_height: e.block_height,
             value: serde_json::from_str(&e.value).ok(),
         })
         .collect();
+
+    if query.include_replies.unwrap_or(false) {
+        let comment_params = HistoryParams {
+            predecessor_id: query.account_id.clone(),
+            current_account_id: contract.to_string(),
+            key: "post/comment".to_string(),
+            limit: query.limit,
+            order: query.order.clone(),
+            from_block: query.from.map(|f| f as i64),
+            to_block: None,
+            fields: None,
+        };
+
+        let comment_entries = app_state.scylladb.get_kv_history(&comment_params).await?;
+
+        posts.extend(comment_entries.into_iter().map(|e| IndexEntry {
+            account_id: e.predecessor_id,
+            block_height: e.block_height,
+            value: serde_json::from_str(&e.value).ok(),
+        }));
+
+        if query.order == "asc" {
+            posts.sort_by_key(|e| e.block_height);
+        } else {
+            posts.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+        }
+
+        posts.truncate(query.limit);
+    }
 
     Ok(HttpResponse::Ok().json(SocialFeedResponse { posts }))
 }

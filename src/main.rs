@@ -1,13 +1,11 @@
 mod handlers;
 mod models;
-mod near_client;
 mod queries;
 mod scylladb;
 mod social_handlers;
 mod tree;
 
-use crate::handlers::{batch_kv_handler, by_key_handler, commit_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler};
-use crate::near_client::NearClient;
+use crate::handlers::{batch_kv_handler, by_key_handler, diff_kv_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler, timeline_kv_handler};
 use crate::social_handlers::{
     social_get_handler, social_keys_handler, social_index_handler,
     social_profile_handler, social_followers_handler, social_following_handler,
@@ -34,9 +32,10 @@ use crate::models::PROJECT_ID;
         handlers::query_kv_handler,
         handlers::history_kv_handler,
         handlers::reverse_kv_handler,
+        handlers::diff_kv_handler,
+        handlers::timeline_kv_handler,
         handlers::batch_kv_handler,
         handlers::by_key_handler,
-        handlers::commit_kv_handler,
         social_handlers::social_get_handler,
         social_handlers::social_keys_handler,
         social_handlers::social_index_handler,
@@ -58,6 +57,9 @@ use crate::models::PROJECT_ID;
         models::BatchResultItem,
         models::BatchResponse,
         models::TreeResponse,
+        models::DiffParams,
+        models::DiffResponse,
+        models::TimelineParams,
         models::ByKeyParams,
         models::AccountsParams,
         models::SocialGetBody,
@@ -72,9 +74,6 @@ use crate::models::PROJECT_ID;
         models::IndexResponse,
         models::SocialFollowResponse,
         models::SocialFeedResponse,
-        models::CommitRequest,
-        models::CommitKey,
-        models::CommitResponse,
     )),
     info(
         title = "FastKV API",
@@ -92,7 +91,6 @@ struct ApiDoc;
 #[derive(Clone)]
 pub struct AppState {
     pub scylladb: Arc<ScyllaDb>,
-    pub near_client: Option<Arc<NearClient>>,
 }
 
 #[actix_web::main]
@@ -127,15 +125,6 @@ async fn main() -> std::io::Result<()> {
             .expect("Can't create scylla db"),
     );
 
-    let near_client = match NearClient::from_env() {
-        Ok(Some(client)) => Some(Arc::new(client)),
-        Ok(None) => None,
-        Err(e) => {
-            tracing::error!(target: PROJECT_ID, error = %e, "Failed to initialize NEAR client");
-            return Err(std::io::Error::other(e.to_string()));
-        }
-    };
-
     HttpServer::new(move || {
         // Configure CORS middleware
         let cors = Cors::default()
@@ -151,7 +140,6 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(AppState {
                 scylladb: Arc::clone(&scylladb),
-                near_client: near_client.clone(),
             }))
             .wrap(cors)
             .wrap(middleware::Compress::default())
@@ -166,8 +154,9 @@ async fn main() -> std::io::Result<()> {
             .service(history_kv_handler)
             .service(reverse_kv_handler)
             .service(batch_kv_handler)
+            .service(diff_kv_handler)
+            .service(timeline_kv_handler)
             .service(by_key_handler)
-            .service(commit_kv_handler)
             .service(social_get_handler)
             .service(social_keys_handler)
             .service(social_index_handler)
