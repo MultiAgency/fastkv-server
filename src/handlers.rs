@@ -1,9 +1,19 @@
 use actix_web::{get, post, web, HttpResponse, http::header};
 use crate::models::*;
+use crate::scylladb::ScyllaDb;
 use crate::tree::build_tree;
 use crate::AppState;
+use tokio::sync::RwLockReadGuard;
 
 use std::collections::HashSet;
+
+pub(crate) async fn require_db(state: &AppState) -> Result<RwLockReadGuard<'_, Option<ScyllaDb>>, ApiError> {
+    let guard = state.scylladb.read().await;
+    if guard.is_none() {
+        return Err(ApiError::DatabaseUnavailable);
+    }
+    Ok(guard)
+}
 
 #[get("/")]
 pub async fn index() -> HttpResponse {
@@ -165,17 +175,25 @@ fn validate_prefix(prefix: &Option<String>) -> Result<(), ApiError> {
 )]
 #[get("/health")]
 pub async fn health_check(app_state: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
-    // Try a simple query to verify DB connection
-    match app_state.scylladb.health_check().await {
-        Ok(_) => Ok(HttpResponse::Ok().json(HealthResponse {
-            status: "ok".to_string(),
+    let guard = app_state.scylladb.read().await;
+    match guard.as_ref() {
+        Some(db) => match db.health_check().await {
+            Ok(_) => Ok(HttpResponse::Ok().json(HealthResponse {
+                status: "ok".to_string(),
+                database: None,
+            })),
+            Err(e) => {
+                tracing::warn!(target: PROJECT_ID, error = %e, "Health check failed");
+                Ok(HttpResponse::ServiceUnavailable().json(HealthResponse {
+                    status: "degraded".to_string(),
+                    database: Some("unavailable".to_string()),
+                }))
+            }
+        },
+        None => Ok(HttpResponse::ServiceUnavailable().json(HealthResponse {
+            status: "degraded".to_string(),
+            database: Some("unavailable".to_string()),
         })),
-        Err(e) => {
-            tracing::warn!(target: PROJECT_ID, error = %e, "Health check failed");
-            Ok(HttpResponse::ServiceUnavailable().json(HealthResponse {
-                status: "database_unavailable".to_string(),
-            }))
-        }
     }
 }
 
@@ -207,8 +225,8 @@ pub async fn get_kv_handler(
         "GET /v1/kv/get"
     );
 
-    let entry = app_state
-        .scylladb
+    let db = require_db(&app_state).await?;
+    let entry = db.as_ref().unwrap()
         .get_kv(&query.predecessor_id, &query.current_account_id, &query.key)
         .await?;
 
@@ -260,8 +278,8 @@ pub async fn query_kv_handler(
         "GET /v1/kv/query"
     );
 
-    let entries = app_state
-        .scylladb
+    let db = require_db(&app_state).await?;
+    let entries = db.as_ref().unwrap()
         .query_kv_with_pagination(&query)
         .await?;
 
@@ -327,8 +345,8 @@ pub async fn history_kv_handler(
         "GET /v1/kv/history"
     );
 
-    let entries = app_state
-        .scylladb
+    let db = require_db(&app_state).await?;
+    let entries = db.as_ref().unwrap()
         .get_kv_history(&query)
         .await?;
 
@@ -366,8 +384,8 @@ pub async fn reverse_kv_handler(
         "GET /v1/kv/reverse"
     );
 
-    let entries = app_state
-        .scylladb
+    let db = require_db(&app_state).await?;
+    let entries = db.as_ref().unwrap()
         .reverse_kv_with_dedup(&query)
         .await?;
 
@@ -405,8 +423,8 @@ pub async fn by_key_handler(
         "GET /v1/kv/by-key"
     );
 
-    let entries = app_state
-        .scylladb
+    let db = require_db(&app_state).await?;
+    let entries = db.as_ref().unwrap()
         .query_by_key(&query)
         .await?;
 
@@ -444,11 +462,13 @@ pub async fn diff_kv_handler(
         "GET /v1/kv/diff"
     );
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     let (a, b) = futures::future::try_join(
-        app_state.scylladb.get_kv_at_block(
+        scylladb.get_kv_at_block(
             &query.predecessor_id, &query.current_account_id, &query.key, query.block_height_a,
         ),
-        app_state.scylladb.get_kv_at_block(
+        scylladb.get_kv_at_block(
             &query.predecessor_id, &query.current_account_id, &query.key, query.block_height_b,
         ),
     ).await?;
@@ -512,8 +532,8 @@ pub async fn timeline_kv_handler(
         "GET /v1/kv/timeline"
     );
 
-    let entries = app_state
-        .scylladb
+    let db = require_db(&app_state).await?;
+    let entries = db.as_ref().unwrap()
         .get_kv_timeline(&query)
         .await?;
 
@@ -565,6 +585,9 @@ pub async fn batch_kv_handler(
         "POST /v1/kv/batch"
     );
 
+    // Verify DB is available before starting batch
+    let _ = require_db(&app_state).await?;
+
     use futures::stream::{self, StreamExt};
     let items: Vec<BatchResultItem> = stream::iter(body.keys.iter().map(|key| {
         let scylladb = app_state.scylladb.clone();
@@ -572,7 +595,9 @@ pub async fn batch_kv_handler(
         let current_account_id = body.current_account_id.clone();
         let key = key.clone();
         async move {
-            match scylladb.get_kv_last(&predecessor_id, &current_account_id, &key).await {
+            let guard = scylladb.read().await;
+            let db = guard.as_ref().unwrap();
+            match db.get_kv_last(&predecessor_id, &current_account_id, &key).await {
                 Ok(value) => BatchResultItem {
                     key,
                     found: value.is_some(),

@@ -162,6 +162,8 @@ pub struct TreeResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct HealthResponse {
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 // Query parameter structs - aligned with official FastData protocol
@@ -474,6 +476,7 @@ pub struct SocialFeedResponse {
 pub enum ApiError {
     InvalidParameter(String),
     DatabaseError(String),
+    DatabaseUnavailable,
 }
 
 impl fmt::Display for ApiError {
@@ -481,6 +484,7 @@ impl fmt::Display for ApiError {
         match self {
             ApiError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
             ApiError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
+            ApiError::DatabaseUnavailable => write!(f, "Database unavailable"),
         }
     }
 }
@@ -490,6 +494,7 @@ impl ResponseError for ApiError {
         let status = match self {
             ApiError::InvalidParameter(_) => StatusCode::BAD_REQUEST,
             ApiError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::DatabaseUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         };
 
         HttpResponse::build(status).json(serde_json::json!({

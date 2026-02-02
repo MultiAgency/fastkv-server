@@ -19,6 +19,7 @@ use dotenv::dotenv;
 use fastnear_primitives::types::ChainId;
 use std::env;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 
@@ -90,7 +91,8 @@ struct ApiDoc;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub scylladb: Arc<ScyllaDb>,
+    pub scylladb: Arc<RwLock<Option<ScyllaDb>>>,
+    pub chain_id: ChainId,
 }
 
 #[actix_web::main]
@@ -109,21 +111,62 @@ async fn main() -> std::io::Result<()> {
         .try_into()
         .expect("Invalid chain id");
 
-    let scylla_session = ScyllaDb::new_scylla_session()
-        .await
-        .expect("Can't create scylla session");
+    let scylladb: Arc<RwLock<Option<ScyllaDb>>> = match ScyllaDb::new_scylla_session().await {
+        Ok(session) => match ScyllaDb::test_connection(&session).await {
+            Ok(_) => match ScyllaDb::new(chain_id, session).await {
+                Ok(db) => {
+                    tracing::info!(target: PROJECT_ID, "Connected to Scylla");
+                    Arc::new(RwLock::new(Some(db)))
+                }
+                Err(e) => {
+                    tracing::warn!(target: PROJECT_ID, error = %e, "Failed to initialize ScyllaDB, starting without database");
+                    Arc::new(RwLock::new(None))
+                }
+            },
+            Err(e) => {
+                tracing::warn!(target: PROJECT_ID, error = %e, "Failed to connect to ScyllaDB, starting without database");
+                Arc::new(RwLock::new(None))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(target: PROJECT_ID, error = %e, "Failed to create ScyllaDB session, starting without database");
+            Arc::new(RwLock::new(None))
+        }
+    };
 
-    ScyllaDb::test_connection(&scylla_session)
-        .await
-        .expect("Can't connect to scylla");
-
-    tracing::info!(target: PROJECT_ID, "Connected to Scylla");
-
-    let scylladb = Arc::new(
-        ScyllaDb::new(chain_id, scylla_session)
-            .await
-            .expect("Can't create scylla db"),
-    );
+    // Background reconnection task
+    {
+        let scylladb = Arc::clone(&scylladb);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                if scylladb.read().await.is_some() {
+                    continue;
+                }
+                tracing::info!(target: PROJECT_ID, "Attempting to reconnect to ScyllaDB...");
+                let session = match ScyllaDb::new_scylla_session().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(target: PROJECT_ID, error = %e, "ScyllaDB reconnection failed");
+                        continue;
+                    }
+                };
+                if let Err(e) = ScyllaDb::test_connection(&session).await {
+                    tracing::warn!(target: PROJECT_ID, error = %e, "ScyllaDB connection test failed");
+                    continue;
+                }
+                match ScyllaDb::new(chain_id, session).await {
+                    Ok(db) => {
+                        *scylladb.write().await = Some(db);
+                        tracing::info!(target: PROJECT_ID, "Successfully reconnected to ScyllaDB");
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: PROJECT_ID, error = %e, "ScyllaDB initialization failed");
+                    }
+                }
+            }
+        });
+    }
 
     HttpServer::new(move || {
         // Configure CORS middleware
@@ -140,6 +183,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(AppState {
                 scylladb: Arc::clone(&scylladb),
+                chain_id,
             }))
             .wrap(cors)
             .wrap(middleware::Compress::default())

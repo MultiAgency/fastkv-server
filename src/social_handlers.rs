@@ -1,6 +1,7 @@
 use actix_web::{get, post, web, HttpResponse};
 use futures::stream::StreamExt;
 
+use crate::handlers::require_db;
 use crate::models::*;
 use crate::tree::build_tree;
 use crate::AppState;
@@ -96,23 +97,27 @@ fn parse_social_key(pattern: &str) -> Result<KeyPattern, ApiError> {
 
 // ===== Helper: query index entries from reverse view =====
 
-async fn query_index(
-    app_state: &AppState,
-    contract_id: &str,
-    action: &str,
-    key: &str,
-    order: &str,
+struct IndexQuery<'a> {
+    app_state: &'a AppState,
+    contract_id: &'a str,
+    action: &'a str,
+    key: &'a str,
+    order: &'a str,
     limit: usize,
     from: Option<u64>,
-    account_id: Option<&str>,
-) -> Result<Vec<IndexEntry>, ApiError> {
+    account_id: Option<&'a str>,
+}
+
+async fn query_index(q: IndexQuery<'_>) -> Result<Vec<IndexEntry>, ApiError> {
+    let IndexQuery { app_state, contract_id, action, key, order, limit, from, account_id } = q;
     let index_key = format!("index/{}/{}", action, key);
 
-    let mut rows_stream = app_state
-        .scylladb
+    let db = require_db(app_state).await?;
+    let scylladb = db.as_ref().unwrap();
+    let mut rows_stream = scylladb
         .scylla_session
         .execute_iter(
-            app_state.scylladb.reverse_kv.clone(),
+            scylladb.reverse_kv.clone(),
             (contract_id, &index_key),
         )
         .await
@@ -233,6 +238,8 @@ pub async fn social_get_handler(
 
     tracing::info!(target: PROJECT_ID, key_count = body.keys.len(), contract_id = %contract, "POST /v1/social/get");
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     let mut result_root = serde_json::Map::new();
     let mut truncated = false;
 
@@ -241,7 +248,7 @@ pub async fn social_get_handler(
 
         match parsed {
             KeyPattern::Exact { account_id, key } => {
-                let entry = app_state.scylladb
+                let entry = scylladb
                     .get_kv(&account_id, contract, &key)
                     .await?;
 
@@ -280,7 +287,7 @@ pub async fn social_get_handler(
                     format: None,
                 };
 
-                let entries = app_state.scylladb.query_kv_with_pagination(&query).await?;
+                let entries = scylladb.query_kv_with_pagination(&query).await?;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
                     truncated = true;
                 }
@@ -314,7 +321,7 @@ pub async fn social_get_handler(
                     format: None,
                 };
 
-                let entries = app_state.scylladb.query_kv_with_pagination(&query).await?;
+                let entries = scylladb.query_kv_with_pagination(&query).await?;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
                     truncated = true;
                 }
@@ -346,7 +353,7 @@ pub async fn social_get_handler(
                     offset: 0,
                     fields: None,
                 };
-                let entries = app_state.scylladb.query_by_key(&by_key_params).await?;
+                let entries = scylladb.query_by_key(&by_key_params).await?;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
                     truncated = true;
                 }
@@ -410,6 +417,8 @@ pub async fn social_keys_handler(
 
     tracing::info!(target: PROJECT_ID, key_count = body.keys.len(), contract_id = %contract, "POST /v1/social/keys");
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     let mut result_root = serde_json::Map::new();
     let mut truncated = false;
 
@@ -418,7 +427,7 @@ pub async fn social_keys_handler(
 
         match parsed {
             KeyPattern::Exact { account_id, key } => {
-                let entry = app_state.scylladb
+                let entry = scylladb
                     .get_kv(&account_id, contract, &key)
                     .await?;
 
@@ -456,7 +465,7 @@ pub async fn social_keys_handler(
                     format: None,
                 };
 
-                let entries = app_state.scylladb.query_kv_with_pagination(&query).await?;
+                let entries = scylladb.query_kv_with_pagination(&query).await?;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
                     truncated = true;
                 }
@@ -541,7 +550,7 @@ pub async fn social_keys_handler(
                     offset: 0,
                     fields: None,
                 };
-                let entries = app_state.scylladb.query_by_key(&by_key_params).await?;
+                let entries = scylladb.query_by_key(&by_key_params).await?;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
                     truncated = true;
                 }
@@ -601,7 +610,16 @@ pub async fn social_index_handler(
 
     tracing::info!(target: PROJECT_ID, action = %query.action, key = %query.key, contract_id = %contract, "GET /v1/social/index");
 
-    let entries = query_index(&app_state, contract, &query.action, &query.key, &query.order, query.limit, query.from, query.account_id.as_deref()).await?;
+    let entries = query_index(IndexQuery {
+        app_state: &app_state,
+        contract_id: contract,
+        action: &query.action,
+        key: &query.key,
+        order: &query.order,
+        limit: query.limit,
+        from: query.from,
+        account_id: query.account_id.as_deref(),
+    }).await?;
 
     Ok(HttpResponse::Ok().json(IndexResponse { entries }))
 }
@@ -629,6 +647,8 @@ pub async fn social_profile_handler(
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/profile");
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     let params = QueryParams {
         predecessor_id: query.account_id.clone(),
         current_account_id: contract.to_string(),
@@ -640,7 +660,7 @@ pub async fn social_profile_handler(
         format: None,
     };
 
-    let entries = app_state.scylladb.query_kv_with_pagination(&params).await?;
+    let entries = scylladb.query_kv_with_pagination(&params).await?;
 
     let items: Vec<(String, String)> = entries.into_iter()
         .map(|e| {
@@ -678,6 +698,8 @@ pub async fn social_followers_handler(
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/followers");
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     // Followers are accounts that wrote key "graph/follow/{accountId}" to the contract
     let follow_key = format!("graph/follow/{}", query.account_id);
 
@@ -689,7 +711,7 @@ pub async fn social_followers_handler(
         offset: query.offset,
     };
 
-    let accounts = app_state.scylladb.query_accounts(&params).await?;
+    let accounts = scylladb.query_accounts(&params).await?;
     let count = accounts.len();
 
     Ok(HttpResponse::Ok().json(SocialFollowResponse { accounts, count }))
@@ -719,6 +741,8 @@ pub async fn social_following_handler(
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/following");
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     // Following are keys under "graph/follow/" written by this account to the contract
     let params = QueryParams {
         predecessor_id: query.account_id.clone(),
@@ -731,7 +755,7 @@ pub async fn social_following_handler(
         format: None,
     };
 
-    let entries = app_state.scylladb.query_kv_with_pagination(&params).await?;
+    let entries = scylladb.query_kv_with_pagination(&params).await?;
 
     // Strip "graph/follow/" prefix to get account IDs
     let accounts: Vec<String> = entries.into_iter()
@@ -766,6 +790,8 @@ pub async fn social_account_feed_handler(
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, "GET /v1/social/feed/account");
 
+    let db = require_db(&app_state).await?;
+    let scylladb = db.as_ref().unwrap();
     let from_block = query.from.map(|f| i64::try_from(f).unwrap_or(i64::MAX));
     let include_replies = query.include_replies.unwrap_or(false);
 
@@ -800,8 +826,8 @@ pub async fn social_account_feed_handler(
 
     let posts: Vec<IndexEntry> = if include_replies {
         let (entries, comment_entries) = futures::future::try_join(
-            app_state.scylladb.get_kv_history(&history_params),
-            app_state.scylladb.get_kv_history(&comment_params),
+            scylladb.get_kv_history(&history_params),
+            scylladb.get_kv_history(&comment_params),
         ).await?;
 
         let mut combined: Vec<IndexEntry> = entries.into_iter()
@@ -818,7 +844,7 @@ pub async fn social_account_feed_handler(
         combined.truncate(query.limit);
         combined
     } else {
-        app_state.scylladb.get_kv_history(&history_params).await?
+        scylladb.get_kv_history(&history_params).await?
             .into_iter().map(to_index_entry).collect()
     };
 

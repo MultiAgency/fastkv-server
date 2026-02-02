@@ -872,6 +872,7 @@ dependencies = [
  "scylla",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-actix-web",
  "tracing-subscriber",
