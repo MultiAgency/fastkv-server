@@ -549,6 +549,57 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+// ===== Edges API types =====
+
+pub const MAX_EDGE_TYPE_LENGTH: usize = 256;
+
+// Raw row from ScyllaDB kv_edges table
+#[derive(DeserializeRow, Debug, Clone)]
+pub struct EdgeRow {
+    pub source: String,
+    pub block_height: i64,
+}
+
+// GET /v1/kv/edges query params
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct EdgesParams {
+    pub edge_type: String,
+    pub target: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    /// Cursor: return sources alphabetically after this value (exclusive). When set, offset is ignored.
+    #[serde(default)]
+    pub after_source: Option<String>,
+}
+
+// GET /v1/kv/edges/count query params
+#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct EdgesCountParams {
+    pub edge_type: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct EdgeSourceEntry {
+    pub source: String,
+    pub block_height: u64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct EdgesResponse {
+    pub sources: Vec<EdgeSourceEntry>,
+    pub count: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct EdgesCountResponse {
+    pub edge_type: String,
+    pub target: String,
+    pub count: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

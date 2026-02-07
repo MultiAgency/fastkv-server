@@ -1,4 +1,4 @@
-use actix_web::{get, post, web, HttpResponse, http::header};
+use actix_web::{get, post, web, HttpResponse};
 use crate::models::*;
 use crate::scylladb::ScyllaDb;
 use crate::tree::build_tree;
@@ -13,94 +13,6 @@ pub(crate) async fn require_db(state: &AppState) -> Result<RwLockReadGuard<'_, O
         return Err(ApiError::DatabaseUnavailable);
     }
     Ok(guard)
-}
-
-#[get("/")]
-pub async fn index() -> HttpResponse {
-    HttpResponse::Ok()
-        .insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8"))
-        .insert_header(("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:;"))
-        .body(r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEAR Garden</title>
-<meta name="description" content="Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.">
-<meta property="og:title" content="NEAR Garden">
-<meta property="og:description" content="Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://fastdata.up.railway.app">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="NEAR Garden">
-<meta name="twitter:description" content="Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.">
-<link rel="canonical" href="https://fastdata.up.railway.app">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127793;</text></svg>">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,monospace;min-height:100vh;display:flex;align-items:center;justify-content:center}
-main{max-width:640px;padding:3rem 2rem}
-h1{font-size:2.4rem;font-weight:700;background:linear-gradient(135deg,#6ef,#a78bfa);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;margin-bottom:.5rem}
-.tag{display:inline-block;font-size:.75rem;background:#1a1a2e;border:1px solid #333;border-radius:4px;padding:2px 8px;margin-bottom:1.5rem;color:#aaa}
-p.desc{color:#b0b0b0;line-height:1.6;margin-bottom:2rem}
-h2{font-size:.85rem;text-transform:uppercase;letter-spacing:.1em;color:#888;margin:1.5rem 0 .5rem}
-ul{list-style:none}
-li a{display:block;padding:4px 0;font-size:.9rem;color:#aaa;text-decoration:none;transition:color .15s}
-li a:hover{color:#6ef}
-li a code{color:#6ef;margin-right:6px;font-size:.75rem;font-family:inherit}
-.example{margin-top:1.5rem;background:#111119;border:1px solid #1a1a2e;border-radius:6px;padding:.8rem 1rem;font-size:.8rem;color:#aaa;overflow-x:auto;white-space:pre}
-.example span{color:#6ef}
-.btns{display:flex;gap:1rem;flex-wrap:wrap;margin-top:2rem}
-a.btn{display:inline-block;padding:.7rem 1.8rem;background:linear-gradient(135deg,#6ef,#a78bfa);color:#0a0a0f;font-weight:600;text-decoration:none;border-radius:6px;font-size:.95rem;transition:opacity .2s}
-a.btn:hover{opacity:.85}
-a.btn.alt{background:linear-gradient(135deg,#a78bfa,#f0abfc)}
-footer{margin-top:2rem;padding-top:1.5rem;border-top:1px solid #1a1a2e}
-footer p{color:#888;font-size:.75rem}
-footer a{color:#6ef;text-decoration:none}
-footer a:hover{text-decoration:underline}
-@media(max-width:400px){main{padding:2rem 1.2rem}h1{font-size:1.8rem}}
-</style>
-</head>
-<body>
-<main>
-<header>
-<h1>NEAR Garden</h1>
-<span class="tag">v1 &middot; NEAR Protocol</span>
-</header>
-<p class="desc">Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.</p>
-<h2>Key-Value</h2>
-<ul>
-<li><a href="/docs"><code>GET</code> /v1/kv/get</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/query</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/history</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/reverse</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/by-key</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/accounts</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/diff</a></li>
-<li><a href="/docs"><code>GET</code> /v1/kv/timeline</a></li>
-<li><a href="/docs"><code>POST</code> /v1/kv/batch</a></li>
-</ul>
-<h2>Social</h2>
-<ul>
-<li><a href="/docs"><code>POST</code> /v1/social/get</a></li>
-<li><a href="/docs"><code>POST</code> /v1/social/keys</a></li>
-<li><a href="/docs"><code>GET</code> /v1/social/index</a></li>
-<li><a href="/docs"><code>GET</code> /v1/social/profile</a></li>
-<li><a href="/docs"><code>GET</code> /v1/social/followers</a></li>
-<li><a href="/docs"><code>GET</code> /v1/social/following</a></li>
-<li><a href="/docs"><code>GET</code> /v1/social/feed/account</a></li>
-</ul>
-<div class="example"><span>$</span> curl https://fastdata.up.railway.app/v1/social/profile?account_id=root.near</div>
-<div class="btns">
-<a class="btn" href="/docs">API Docs &rarr;</a>
-<a class="btn alt" href="https://near.directory">NEAR Directory &rarr;</a>
-</div>
-<footer>
-<p>NEAR Directory is a demo app built using <a href="https://hackmd.io/@fastnear/__fastdata">FastData</a>. Powered by <a href="https://fastnear.com">FastNear</a>.</p>
-</footer>
-</main>
-</body>
-</html>"#)
 }
 
 fn respond_with_entries(entries: Vec<KvEntry>, fields: &Option<HashSet<String>>) -> HttpResponse {
@@ -683,5 +595,98 @@ pub async fn batch_kv_handler(
     .await;
 
     Ok(HttpResponse::Ok().json(BatchResponse { results: items }))
+}
+
+/// List edge sources for a given edge type and target
+#[utoipa::path(
+    get,
+    path = "/v1/kv/edges",
+    params(EdgesParams),
+    responses(
+        (status = 200, description = "List of edge sources", body = EdgesResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError),
+        (status = 503, description = "Database unavailable", body = ApiError),
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/edges")]
+pub async fn edges_handler(
+    query: web::Query<EdgesParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    validate_key(&query.edge_type, "edge_type", MAX_EDGE_TYPE_LENGTH)?;
+    validate_account_id(&query.target, "target")?;
+    validate_limit(query.limit)?;
+
+    if query.after_source.is_none() {
+        validate_offset(query.offset)?;
+    }
+
+    if let Some(ref cursor) = query.after_source {
+        validate_account_id(cursor, "after_source")?;
+    }
+
+    tracing::info!(
+        target: PROJECT_ID,
+        edge_type = %query.edge_type,
+        target = %query.target,
+        limit = query.limit,
+        offset = query.offset,
+        after_source = ?query.after_source,
+        "GET /v1/kv/edges"
+    );
+
+    let db = require_db(&app_state).await?;
+    let sources = db.as_ref().ok_or(ApiError::DatabaseUnavailable)?
+        .query_edges(
+            &query.edge_type,
+            &query.target,
+            query.limit,
+            query.offset,
+            query.after_source.as_deref(),
+        )
+        .await?;
+
+    let count = sources.len();
+    Ok(HttpResponse::Ok().json(EdgesResponse { sources, count }))
+}
+
+/// Count edges for a given edge type and target
+#[utoipa::path(
+    get,
+    path = "/v1/kv/edges/count",
+    params(EdgesCountParams),
+    responses(
+        (status = 200, description = "Edge count", body = EdgesCountResponse),
+        (status = 400, description = "Invalid parameters", body = ApiError),
+        (status = 503, description = "Database unavailable", body = ApiError),
+    ),
+    tag = "kv"
+)]
+#[get("/v1/kv/edges/count")]
+pub async fn edges_count_handler(
+    query: web::Query<EdgesCountParams>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    validate_key(&query.edge_type, "edge_type", MAX_EDGE_TYPE_LENGTH)?;
+    validate_account_id(&query.target, "target")?;
+
+    tracing::info!(
+        target: PROJECT_ID,
+        edge_type = %query.edge_type,
+        target = %query.target,
+        "GET /v1/kv/edges/count"
+    );
+
+    let db = require_db(&app_state).await?;
+    let count = db.as_ref().ok_or(ApiError::DatabaseUnavailable)?
+        .count_edges(&query.edge_type, &query.target)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(EdgesCountResponse {
+        edge_type: query.edge_type.clone(),
+        target: query.target.clone(),
+        count,
+    }))
 }
 

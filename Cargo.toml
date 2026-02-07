@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 actix-web = "4.5.1"
 actix-cors = "0.7.0"
+actix-files = "0.6"
 dotenv = "0.15.0"
 fastnear-primitives = "0.1.0"
 tracing = { version = "0.1.13", features = ["log"] }

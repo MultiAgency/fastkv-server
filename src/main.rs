@@ -5,7 +5,8 @@ mod scylladb;
 mod social_handlers;
 mod tree;
 
-use crate::handlers::{accounts_handler, batch_kv_handler, by_key_handler, diff_kv_handler, get_kv_handler, health_check, history_kv_handler, index, query_kv_handler, reverse_kv_handler, timeline_kv_handler};
+use crate::handlers::{accounts_handler, batch_kv_handler, by_key_handler, diff_kv_handler, edges_handler, edges_count_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, reverse_kv_handler, timeline_kv_handler};
+use actix_files::Files;
 use crate::social_handlers::{
     social_get_handler, social_keys_handler, social_index_handler,
     social_profile_handler, social_followers_handler, social_following_handler,
@@ -38,6 +39,8 @@ use crate::models::PROJECT_ID;
         handlers::batch_kv_handler,
         handlers::by_key_handler,
         handlers::accounts_handler,
+        handlers::edges_handler,
+        handlers::edges_count_handler,
         social_handlers::social_get_handler,
         social_handlers::social_keys_handler,
         social_handlers::social_index_handler,
@@ -66,6 +69,11 @@ use crate::models::PROJECT_ID;
         models::AccountsParams,
         models::AccountsQueryParams,
         models::AccountsResponse,
+        models::EdgesParams,
+        models::EdgesCountParams,
+        models::EdgeSourceEntry,
+        models::EdgesResponse,
+        models::EdgesCountResponse,
         models::SocialGetBody,
         models::SocialGetOptions,
         models::SocialKeysBody,
@@ -200,7 +208,6 @@ async fn main() -> std::io::Result<()> {
             ))
             .wrap(tracing_actix_web::TracingLogger::default())
             .service(Scalar::with_url("/docs", ApiDoc::openapi()))
-            .service(index)
             .service(health_check)
             .service(get_kv_handler)
             .service(query_kv_handler)
@@ -211,6 +218,8 @@ async fn main() -> std::io::Result<()> {
             .service(timeline_kv_handler)
             .service(by_key_handler)
             .service(accounts_handler)
+            .service(edges_handler)
+            .service(edges_count_handler)
             .service(social_get_handler)
             .service(social_keys_handler)
             .service(social_index_handler)
@@ -218,6 +227,10 @@ async fn main() -> std::io::Result<()> {
             .service(social_followers_handler)
             .service(social_following_handler)
             .service(social_account_feed_handler)
+            .service(
+                Files::new("/", "./static")
+                    .index_file("index.html")
+            )
     })
     .bind(format!(
         "0.0.0.0:{}",

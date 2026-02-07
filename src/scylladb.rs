@@ -2,7 +2,7 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 
-use crate::models::{AccountsParams, ByKeyParams, ContractAccountRow, HistoryParams, KvEntry, KvHistoryRow, KvPredecessorRow, KvRow, QueryParams, ReverseParams, TimelineParams, MAX_DEDUP_SCAN, MAX_HISTORY_SCAN};
+use crate::models::{AccountsParams, ByKeyParams, ContractAccountRow, EdgeRow, EdgeSourceEntry, HistoryParams, KvEntry, KvHistoryRow, KvPredecessorRow, KvRow, QueryParams, ReverseParams, TimelineParams, MAX_DEDUP_SCAN, MAX_HISTORY_SCAN, bigint_to_u64};
 use crate::queries::build_prefix_query;
 use fastnear_primitives::types::ChainId;
 use rustls::pki_types::pem::PemObject;
@@ -32,6 +32,9 @@ pub struct ScyllaDb {
     accounts_by_key: PreparedStatement,
     accounts_by_contract: PreparedStatement,
     accounts_by_contract_key: PreparedStatement,
+    edges_list: PreparedStatement,
+    edges_list_cursor: PreparedStatement,
+    edges_count: PreparedStatement,
 
     pub scylla_session: Session,
     pub table_name: String,
@@ -39,6 +42,7 @@ pub struct ScyllaDb {
     pub reverse_view_name: String,
     pub by_key_view_name: String,
     pub kv_accounts_table_name: String,
+    pub kv_edges_table_name: String,
 }
 
 pub fn create_rustls_client_config() -> anyhow::Result<Arc<ClientConfig>> {
@@ -145,12 +149,15 @@ impl ScyllaDb {
             .unwrap_or_else(|_| "mv_kv_key".to_string());
         let kv_accounts_table_name = env::var("KV_ACCOUNTS_TABLE_NAME")
             .unwrap_or_else(|_| "kv_accounts".to_string());
+        let kv_edges_table_name = env::var("KV_EDGES_TABLE_NAME")
+            .unwrap_or_else(|_| "kv_edges".to_string());
 
         validate_identifier(&table_name, "TABLE_NAME")?;
         validate_identifier(&history_table_name, "HISTORY_TABLE_NAME")?;
         validate_identifier(&reverse_view_name, "REVERSE_VIEW_NAME")?;
         validate_identifier(&by_key_view_name, "BY_KEY_VIEW_NAME")?;
         validate_identifier(&kv_accounts_table_name, "KV_ACCOUNTS_TABLE_NAME")?;
+        validate_identifier(&kv_edges_table_name, "KV_EDGES_TABLE_NAME")?;
 
         let columns = "predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash";
         let history_columns = "predecessor_id, current_account_id, key, block_height, order_id, value, block_timestamp, receipt_id, tx_hash, signer_id, shard_id, receipt_index, action_index";
@@ -213,12 +220,28 @@ impl ScyllaDb {
                 &format!("SELECT predecessor_id FROM {} WHERE current_account_id = ? AND key = ?", kv_accounts_table_name),
                 scylla::frame::types::Consistency::LocalQuorum,
             ).await?,
+            edges_list: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT source, block_height FROM {} WHERE edge_type = ? AND target = ?", kv_edges_table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            edges_list_cursor: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT source, block_height FROM {} WHERE edge_type = ? AND target = ? AND source > ?", kv_edges_table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            edges_count: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT COUNT(*) FROM {} WHERE edge_type = ? AND target = ?", kv_edges_table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
             scylla_session,
             table_name,
             history_table_name,
             reverse_view_name,
             by_key_view_name,
             kv_accounts_table_name,
+            kv_edges_table_name,
         })
     }
 
@@ -689,6 +712,85 @@ impl ScyllaDb {
             .collect();
 
         Ok(result)
+    }
+
+    pub async fn query_edges(
+        &self,
+        edge_type: &str,
+        target: &str,
+        limit: usize,
+        offset: usize,
+        after_source: Option<&str>,
+    ) -> anyhow::Result<Vec<EdgeSourceEntry>> {
+        let mut rows_stream = match after_source {
+            Some(cursor) => {
+                self.scylla_session
+                    .execute_iter(self.edges_list_cursor.clone(), (edge_type, target, cursor))
+                    .await?
+                    .rows_stream::<EdgeRow>()?
+            }
+            None => {
+                self.scylla_session
+                    .execute_iter(self.edges_list.clone(), (edge_type, target))
+                    .await?
+                    .rows_stream::<EdgeRow>()?
+            }
+        };
+
+        let mut skipped = 0;
+        let mut entries = Vec::with_capacity(limit);
+
+        while let Some(row_result) = rows_stream.next().await {
+            let row = match row_result {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "fastkv-server",
+                        error = %e,
+                        "Failed to deserialize row in query_edges"
+                    );
+                    continue;
+                }
+            };
+
+            // Only apply offset when not using cursor-based pagination
+            if after_source.is_none() && skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            entries.push(EdgeSourceEntry {
+                source: row.source,
+                block_height: bigint_to_u64(row.block_height),
+            });
+
+            if entries.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(entries)
+    }
+
+    pub async fn count_edges(
+        &self,
+        edge_type: &str,
+        target: &str,
+    ) -> anyhow::Result<usize> {
+        let result = self
+            .scylla_session
+            .execute_unpaged(&self.edges_count, (edge_type, target))
+            .await?
+            .into_rows_result()?;
+
+        let count = result
+            .rows::<(i64,)>()?
+            .next()
+            .transpose()?
+            .map(|row| row.0.max(0) as usize)
+            .unwrap_or(0);
+
+        Ok(count)
     }
 
     pub async fn get_kv_history(

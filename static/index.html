@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEAR Garden</title>
+<meta name="description" content="Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.">
+<meta property="og:title" content="NEAR Garden">
+<meta property="og:description" content="Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://fastdata.up.railway.app">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="NEAR Garden">
+<meta name="twitter:description" content="Read-only API for NEAR on-chain key-value data and SocialDB. No API key required.">
+<link rel="canonical" href="https://fastdata.up.railway.app">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127793;</text></svg>">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="header-left">
+    <h1 class="logo">NEAR Garden</h1>
+    <span class="tag">v1 &middot; NEAR Protocol</span>
+  </div>
+  <nav>
+    <a href="/docs" class="nav-link">API Docs</a>
+  </nav>
+</header>
+
+<main>
+  <div class="controls">
+    <div class="contract-row">
+      <label for="contract-input" class="label">contract</label>
+      <input id="contract-input" type="text" value="social.near" spellcheck="false">
+    </div>
+    <form id="explore-form" class="search-row">
+      <input id="query-input" type="text" placeholder="root.near/profile/**" spellcheck="false">
+      <button type="submit" id="explore-btn">explore_</button>
+    </form>
+    <div class="quick-paths" id="quick-paths">
+      <button type="button" data-path="profile">profile</button>
+      <button type="button" data-path="graph">graph</button>
+      <button type="button" data-path="index">index</button>
+    </div>
+  </div>
+
+  <div id="breadcrumb" class="breadcrumb"></div>
+
+  <div class="view-toggle">
+    <button type="button" id="view-tree" class="active" aria-pressed="true">tree</button>
+    <button type="button" id="view-json" aria-pressed="false">json</button>
+  </div>
+
+  <div id="error-bar" class="error-bar" hidden>
+    <span id="error-msg"></span>
+    <button type="button" id="retry-btn">retry_</button>
+  </div>
+
+  <div id="content" class="content">
+    <div id="tree-panel" class="panel tree-panel">
+      <div id="tree" role="tree"></div>
+    </div>
+    <div id="detail-panel" class="panel detail-panel" hidden>
+      <div id="detail-path" class="detail-path"></div>
+      <pre id="detail-value" class="detail-value"></pre>
+      <div id="detail-meta" class="detail-meta"></div>
+    </div>
+  </div>
+
+  <div id="json-panel" class="panel json-panel" hidden>
+    <pre id="json-view"></pre>
+  </div>
+</main>
+
+<footer>
+  <p>NEAR Directory is a demo app built using <a href="https://hackmd.io/@fastnear/__fastdata">FastData</a>. Powered by <a href="https://fastnear.com">FastNear</a>.</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
