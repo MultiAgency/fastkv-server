@@ -48,13 +48,6 @@ pub struct KvHistoryRow {
     pub action_index: i32,
 }
 
-// Lightweight row for predecessor-only queries (with optional value for null filtering)
-#[derive(DeserializeRow, Debug, Clone)]
-pub struct KvPredecessorRow {
-    pub predecessor_id: String,
-    pub value: String,
-}
-
 // Lightweight row for contract-based account queries (predecessor_id only)
 #[derive(DeserializeRow, Debug, Clone)]
 pub struct ContractAccountRow {
@@ -74,6 +67,9 @@ pub struct KvEntry {
     pub block_timestamp: u64,
     pub receipt_id: String,
     pub tx_hash: String,
+    /// True when the entry represents a deletion (value is the literal string "null").
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_deleted: bool,
 }
 
 impl KvEntry {
@@ -107,6 +103,9 @@ impl KvEntry {
             if field_set.contains("tx_hash") {
                 map.insert("tx_hash".to_string(), serde_json::json!(&self.tx_hash));
             }
+            if field_set.contains("is_deleted") && self.is_deleted {
+                map.insert("is_deleted".to_string(), serde_json::json!(true));
+            }
 
             serde_json::Value::Object(map)
         } else {
@@ -128,6 +127,7 @@ pub fn bigint_to_u64(val: i64) -> u64 {
 
 impl From<KvRow> for KvEntry {
     fn from(row: KvRow) -> Self {
+        let is_deleted = row.value == "null";
         Self {
             predecessor_id: row.predecessor_id,
             current_account_id: row.current_account_id,
@@ -137,12 +137,14 @@ impl From<KvRow> for KvEntry {
             block_timestamp: bigint_to_u64(row.block_timestamp),
             receipt_id: row.receipt_id,
             tx_hash: row.tx_hash,
+            is_deleted,
         }
     }
 }
 
 impl From<KvHistoryRow> for KvEntry {
     fn from(row: KvHistoryRow) -> Self {
+        let is_deleted = row.value == "null";
         Self {
             predecessor_id: row.predecessor_id,
             current_account_id: row.current_account_id,
@@ -152,8 +154,19 @@ impl From<KvHistoryRow> for KvEntry {
             block_timestamp: bigint_to_u64(row.block_timestamp),
             receipt_id: row.receipt_id,
             tx_hash: row.tx_hash,
+            is_deleted,
         }
     }
+}
+
+// Pagination metadata returned in all paginated responses
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PaginationMeta {
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 // Standardized paginated response for all list endpoints
@@ -163,6 +176,7 @@ pub struct PaginatedResponse<T: Serialize> {
     pub has_more: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    pub meta: PaginationMeta,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -190,6 +204,9 @@ pub struct GetParams {
     /// When true, JSON-decode the value field instead of returning the raw encoded string.
     #[serde(default)]
     pub decode: Option<bool>,
+    /// Value format: "raw" (default) or "json" (decoded). Supersedes `decode` when set.
+    #[serde(default)]
+    pub value_format: Option<String>,
 }
 
 /// Parse a comma-separated fields string into a set of field names.
@@ -200,6 +217,19 @@ pub fn parse_field_set(fields: &Option<String>) -> Option<std::collections::Hash
             .filter(|s| !s.is_empty())
             .collect()
     })
+}
+
+/// Resolve whether to decode values based on `value_format` and deprecated `decode` param.
+/// `value_format` takes precedence when set.
+pub fn should_decode(value_format: &Option<String>, decode: &Option<bool>) -> Result<bool, ApiError> {
+    match value_format.as_deref() {
+        Some("json") => Ok(true),
+        Some("raw") => Ok(false),
+        None => Ok(decode.unwrap_or(false)),
+        Some(other) => Err(ApiError::InvalidParameter(
+            format!("value_format must be 'json' or 'raw', got '{}'", other),
+        )),
+    }
 }
 
 pub fn validate_limit(limit: usize) -> Result<(), ApiError> {
@@ -230,6 +260,13 @@ pub struct QueryParams {
     /// When true, JSON-decode the value field instead of returning the raw encoded string.
     #[serde(default)]
     pub decode: Option<bool>,
+    /// Value format: "raw" (default) or "json" (decoded). Supersedes `decode` when set.
+    #[serde(default)]
+    pub value_format: Option<String>,
+    /// Cursor: return entries with key alphabetically after this value (exclusive).
+    /// Cannot be combined with offset > 0.
+    #[serde(default)]
+    pub after_key: Option<String>,
 }
 
 
@@ -254,6 +291,13 @@ pub struct WritersParams {
     /// When true, JSON-decode the value field instead of returning the raw encoded string.
     #[serde(default)]
     pub decode: Option<bool>,
+    /// Value format: "raw" (default) or "json" (decoded). Supersedes `decode` when set.
+    #[serde(default)]
+    pub value_format: Option<String>,
+    /// Cursor: return writers with account ID alphabetically after this value (exclusive).
+    /// Cannot be combined with offset > 0.
+    #[serde(default)]
+    pub after_account: Option<String>,
 }
 
 
@@ -282,6 +326,9 @@ pub struct HistoryParams {
     /// When true, JSON-decode the value field instead of returning the raw encoded string.
     #[serde(default)]
     pub decode: Option<bool>,
+    /// Value format: "raw" (default) or "json" (decoded). Supersedes `decode` when set.
+    #[serde(default)]
+    pub value_format: Option<String>,
 }
 
 
@@ -305,6 +352,9 @@ pub struct AccountsParams {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
+    /// Cursor: return accounts alphabetically after this value (exclusive).
+    #[serde(default)]
+    pub after_account: Option<String>,
 }
 
 // Accounts-by-contract query parameters
@@ -320,6 +370,10 @@ pub struct AccountsQueryParams {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
+    /// Cursor: return accounts alphabetically after this value (exclusive).
+    /// Cannot be combined with offset > 0.
+    #[serde(default)]
+    pub after_account: Option<String>,
 }
 
 // Diff query parameters
@@ -337,6 +391,9 @@ pub struct DiffParams {
     /// When true, JSON-decode the value field instead of returning the raw encoded string.
     #[serde(default)]
     pub decode: Option<bool>,
+    /// Value format: "raw" (default) or "json" (decoded). Supersedes `decode` when set.
+    #[serde(default)]
+    pub value_format: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -367,6 +424,9 @@ pub struct TimelineParams {
     /// When true, JSON-decode the value field instead of returning the raw encoded string.
     #[serde(default)]
     pub decode: Option<bool>,
+    /// Value format: "raw" (default) or "json" (decoded). Supersedes `decode` when set.
+    #[serde(default)]
+    pub value_format: Option<String>,
 }
 
 // Batch query structs
@@ -466,6 +526,10 @@ pub struct SocialFollowParams {
     pub offset: usize,
     #[serde(default)]
     pub contract_id: Option<String>,
+    /// Cursor: return accounts alphabetically after this value (exclusive).
+    /// Cannot be combined with offset > 0.
+    #[serde(default)]
+    pub after_account: Option<String>,
 }
 
 // GET /v1/social/feed/account query params
@@ -505,6 +569,7 @@ pub struct IndexResponse {
 pub struct SocialFollowResponse {
     pub accounts: Vec<String>,
     pub count: usize,
+    pub meta: PaginationMeta,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -635,6 +700,63 @@ mod tests {
         assert_eq!(entry.block_timestamp, 1234567890123456789);
         assert_eq!(entry.receipt_id, "abc123");
         assert_eq!(entry.tx_hash, "def456");
+        assert!(!entry.is_deleted);
+    }
+
+    #[test]
+    fn test_kv_entry_is_deleted() {
+        let row = KvRow {
+            predecessor_id: "alice.near".to_string(),
+            current_account_id: "social.near".to_string(),
+            key: "profile".to_string(),
+            value: "null".to_string(),
+            block_height: 100,
+            block_timestamp: 200,
+            receipt_id: "r".to_string(),
+            tx_hash: "t".to_string(),
+        };
+
+        let entry: KvEntry = row.into();
+        assert!(entry.is_deleted);
+
+        // Verify is_deleted is serialized when true
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["is_deleted"], true);
+    }
+
+    #[test]
+    fn test_kv_entry_is_deleted_omitted_when_false() {
+        let row = KvRow {
+            predecessor_id: "alice.near".to_string(),
+            current_account_id: "social.near".to_string(),
+            key: "profile".to_string(),
+            value: "\"hello\"".to_string(),
+            block_height: 100,
+            block_timestamp: 200,
+            receipt_id: "r".to_string(),
+            tx_hash: "t".to_string(),
+        };
+
+        let entry: KvEntry = row.into();
+        assert!(!entry.is_deleted);
+
+        // Verify is_deleted is omitted when false
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("is_deleted").is_none());
+    }
+
+    #[test]
+    fn test_should_decode() {
+        // value_format takes precedence
+        assert!(should_decode(&Some("json".to_string()), &None).unwrap());
+        assert!(should_decode(&Some("json".to_string()), &Some(false)).unwrap());
+        assert!(!should_decode(&Some("raw".to_string()), &Some(true)).unwrap());
+        // Falls back to decode when value_format is None
+        assert!(should_decode(&None, &Some(true)).unwrap());
+        assert!(!should_decode(&None, &Some(false)).unwrap());
+        assert!(!should_decode(&None, &None).unwrap());
+        // Invalid value_format
+        assert!(should_decode(&Some("invalid".to_string()), &None).is_err());
     }
 
     #[test]
@@ -648,5 +770,27 @@ mod tests {
         assert_eq!(bigint_to_u64(i64::MIN), 0);
         assert_eq!(bigint_to_u64(0), 0);
         assert_eq!(bigint_to_u64(42), 42);
+    }
+
+    #[test]
+    fn test_pagination_meta_serialization() {
+        let meta = PaginationMeta {
+            has_more: true,
+            truncated: false,
+            next_cursor: Some("abc".to_string()),
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["has_more"], true);
+        assert!(json.get("truncated").is_none()); // skipped when false
+        assert_eq!(json["next_cursor"], "abc");
+
+        let meta_no_cursor = PaginationMeta {
+            has_more: false,
+            truncated: true,
+            next_cursor: None,
+        };
+        let json = serde_json::to_value(&meta_no_cursor).unwrap();
+        assert_eq!(json["truncated"], true);
+        assert!(json.get("next_cursor").is_none()); // skipped when None
     }
 }

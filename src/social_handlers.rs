@@ -312,6 +312,8 @@ pub async fn social_get_handler(
                     fields: None,
                     format: None,
                     decode: None,
+                    value_format: None,
+                    after_key: None,
                 };
 
                 let (entries, ..) = scylladb.query_kv_with_pagination(&query).await?;
@@ -347,6 +349,8 @@ pub async fn social_get_handler(
                     fields: None,
                     format: None,
                     decode: None,
+                    value_format: None,
+                    after_key: None,
                 };
 
                 let (entries, ..) = scylladb.query_kv_with_pagination(&query).await?;
@@ -383,6 +387,8 @@ pub async fn social_get_handler(
                     offset: 0,
                     fields: None,
                     decode: None,
+                    value_format: None,
+                    after_account: None,
                 };
                 let entries = scylladb.query_writers(&by_key_params).await?.0;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
@@ -496,6 +502,8 @@ pub async fn social_keys_handler(
                     fields: None,
                     format: None,
                     decode: None,
+                    value_format: None,
+                    after_key: None,
                 };
 
                 let (entries, ..) = scylladb.query_kv_with_pagination(&query).await?;
@@ -600,6 +608,8 @@ pub async fn social_keys_handler(
                     offset: 0,
                     fields: None,
                     decode: None,
+                    value_format: None,
+                    after_account: None,
                 };
                 let entries = scylladb.query_writers(&by_key_params).await?.0;
                 if entries.len() >= MAX_SOCIAL_RESULTS {
@@ -709,6 +719,8 @@ pub async fn social_profile_handler(
         fields: None,
         format: None,
         decode: None,
+        value_format: None,
+        after_key: None,
     };
 
     let (entries, ..) = scylladb.query_kv_with_pagination(&params).await?;
@@ -742,8 +754,19 @@ pub async fn social_followers_handler(
 ) -> Result<HttpResponse, ApiError> {
     validate_account_id(&query.account_id, "account_id")?;
     validate_limit(query.limit)?;
-    validate_offset(query.offset)?;
     let contract = resolve_contract(&query.contract_id)?;
+
+    // Validate cursor vs offset conflict
+    if let Some(ref cursor) = query.after_account {
+        validate_account_id(cursor, "after_account")?;
+        if query.offset > 0 {
+            return Err(ApiError::InvalidParameter(
+                "cannot use both 'after_account' cursor and 'offset'".to_string(),
+            ));
+        }
+    } else {
+        validate_offset(query.offset)?;
+    }
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/followers");
 
@@ -758,12 +781,22 @@ pub async fn social_followers_handler(
         exclude_null: Some(true),
         limit: query.limit,
         offset: query.offset,
+        after_account: query.after_account.clone(),
     };
 
-    let accounts = scylladb.query_accounts(&params).await?;
+    let (accounts, has_more) = scylladb.query_accounts(&params).await?;
     let count = accounts.len();
+    let next_cursor = if has_more { accounts.last().cloned() } else { None };
 
-    Ok(HttpResponse::Ok().json(SocialFollowResponse { accounts, count }))
+    Ok(HttpResponse::Ok().json(SocialFollowResponse {
+        accounts,
+        count,
+        meta: PaginationMeta {
+            has_more,
+            truncated: false,
+            next_cursor,
+        },
+    }))
 }
 
 /// Get accounts a user follows
@@ -784,8 +817,19 @@ pub async fn social_following_handler(
 ) -> Result<HttpResponse, ApiError> {
     validate_account_id(&query.account_id, "account_id")?;
     validate_limit(query.limit)?;
-    validate_offset(query.offset)?;
     let contract = resolve_contract(&query.contract_id)?;
+
+    // Validate cursor vs offset conflict
+    if let Some(ref cursor) = query.after_account {
+        validate_account_id(cursor, "after_account")?;
+        if query.offset > 0 {
+            return Err(ApiError::InvalidParameter(
+                "cannot use both 'after_account' cursor and 'offset'".to_string(),
+            ));
+        }
+    } else {
+        validate_offset(query.offset)?;
+    }
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/following");
 
@@ -802,16 +846,27 @@ pub async fn social_following_handler(
         fields: None,
         format: None,
         decode: None,
+        value_format: None,
+        after_key: query.after_account.as_ref().map(|a| format!("graph/follow/{}", a)),
     };
 
-    let (entries, ..) = scylladb.query_kv_with_pagination(&params).await?;
+    let (entries, has_more) = scylladb.query_kv_with_pagination(&params).await?;
 
     let accounts: Vec<String> = entries.into_iter()
         .filter_map(|e| e.key.strip_prefix("graph/follow/").map(|s| s.to_string()))
         .collect();
     let count = accounts.len();
+    let next_cursor = if has_more { accounts.last().cloned() } else { None };
 
-    Ok(HttpResponse::Ok().json(SocialFollowResponse { accounts, count }))
+    Ok(HttpResponse::Ok().json(SocialFollowResponse {
+        accounts,
+        count,
+        meta: PaginationMeta {
+            has_more,
+            truncated: false,
+            next_cursor,
+        },
+    }))
 }
 
 /// Get posts from a specific account
@@ -858,6 +913,7 @@ pub async fn social_account_feed_handler(
         to_block: None,
         fields: None,
         decode: None,
+        value_format: None,
     };
 
     let comment_params = HistoryParams {
@@ -870,6 +926,7 @@ pub async fn social_account_feed_handler(
         to_block: None,
         fields: None,
         decode: None,
+        value_format: None,
     };
 
     let posts: Vec<IndexEntry> = if include_replies {

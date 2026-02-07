@@ -34,7 +34,14 @@ fn respond_paginated(
     truncated: bool,
     fields: &Option<HashSet<String>>,
     decode: bool,
+    next_cursor: Option<String>,
 ) -> HttpResponse {
+    let meta = PaginationMeta {
+        has_more,
+        truncated,
+        next_cursor,
+    };
+
     if fields.is_some() || decode {
         let filtered: Vec<_> = entries
             .into_iter()
@@ -46,7 +53,7 @@ fn respond_paginated(
                 json
             })
             .collect();
-        let mut resp = serde_json::json!({ "data": filtered, "has_more": has_more });
+        let mut resp = serde_json::json!({ "data": filtered, "has_more": has_more, "meta": meta });
         if truncated {
             resp["truncated"] = serde_json::json!(true);
         }
@@ -56,6 +63,7 @@ fn respond_paginated(
             data: entries,
             has_more,
             truncated,
+            meta,
         })
     }
 }
@@ -149,7 +157,7 @@ pub async fn health_check(app_state: web::Data<AppState>) -> Result<HttpResponse
     path = "/v1/kv/get",
     params(GetParams),
     responses(
-        (status = 200, description = "Entry found or null if not found", body = KvEntry),
+        (status = 200, description = "Entry found or null if not found"),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -178,16 +186,16 @@ pub async fn get_kv_handler(
 
     // Apply field selection and optional value decoding
     let fields = parse_field_set(&query.fields);
-    let decode = query.decode.unwrap_or(false);
+    let decode = should_decode(&query.value_format, &query.decode)?;
     match entry {
         Some(entry) => {
             let mut json = entry.to_json_with_fields(&fields);
             if decode {
                 decode_value_in_json(&mut json);
             }
-            Ok(HttpResponse::Ok().json(json))
+            Ok(HttpResponse::Ok().json(serde_json::json!({ "data": json })))
         }
-        None => Ok(HttpResponse::Ok().json(serde_json::Value::Null)),
+        None => Ok(HttpResponse::Ok().json(serde_json::json!({ "data": null }))),
     }
 }
 
@@ -210,8 +218,19 @@ pub async fn query_kv_handler(
     validate_account_id(&query.predecessor_id, "accountId")?;
     validate_account_id(&query.current_account_id, "contractId")?;
     validate_limit(query.limit)?;
-    validate_offset(query.offset)?;
     validate_prefix(&query.key_prefix)?;
+
+    // Validate cursor vs offset conflict
+    if let Some(ref cursor) = query.after_key {
+        validate_key(cursor, "after_key", MAX_KEY_LENGTH)?;
+        if query.offset > 0 {
+            return Err(ApiError::InvalidParameter(
+                "cannot use both 'after_key' cursor and 'offset'".to_string(),
+            ));
+        }
+    } else {
+        validate_offset(query.offset)?;
+    }
 
     if let Some(ref fmt) = query.format {
         if fmt != "tree" {
@@ -228,6 +247,7 @@ pub async fn query_kv_handler(
         key_prefix = ?query.key_prefix,
         limit = query.limit,
         offset = query.offset,
+        after_key = ?query.after_key,
         "GET /v1/kv/query"
     );
 
@@ -245,9 +265,10 @@ pub async fn query_kv_handler(
         return Ok(HttpResponse::Ok().json(TreeResponse { tree }));
     }
 
+    let next_cursor = if has_more { entries.last().map(|e| e.key.clone()) } else { None };
     let fields = parse_field_set(&query.fields);
-    let decode = query.decode.unwrap_or(false);
-    Ok(respond_paginated(entries, has_more, false, &fields, decode))
+    let decode = should_decode(&query.value_format, &query.decode)?;
+    Ok(respond_paginated(entries, has_more, false, &fields, decode, next_cursor))
 }
 
 /// Get historical versions of a KV entry
@@ -308,9 +329,10 @@ pub async fn history_kv_handler(
         .get_kv_history(&query)
         .await?;
 
+    let next_cursor = if has_more { entries.last().map(|e| e.block_height.to_string()) } else { None };
     let fields = parse_field_set(&query.fields);
-    let decode = query.decode.unwrap_or(false);
-    Ok(respond_paginated(entries, has_more, truncated, &fields, decode))
+    let decode = should_decode(&query.value_format, &query.decode)?;
+    Ok(respond_paginated(entries, has_more, truncated, &fields, decode, next_cursor))
 }
 
 /// Find all writers for a key under a contract, with optional account filter
@@ -332,9 +354,20 @@ pub async fn writers_handler(
     validate_account_id(&query.current_account_id, "contractId")?;
     validate_key(&query.key, "key", MAX_KEY_LENGTH)?;
     validate_limit(query.limit)?;
-    validate_offset(query.offset)?;
     if let Some(ref pred) = query.predecessor_id {
         validate_account_id(pred, "accountId")?;
+    }
+
+    // Validate cursor vs offset conflict
+    if let Some(ref cursor) = query.after_account {
+        validate_account_id(cursor, "after_account")?;
+        if query.offset > 0 {
+            return Err(ApiError::InvalidParameter(
+                "cannot use both 'after_account' cursor and 'offset'".to_string(),
+            ));
+        }
+    } else {
+        validate_offset(query.offset)?;
     }
 
     tracing::info!(
@@ -344,6 +377,7 @@ pub async fn writers_handler(
         accountId = ?query.predecessor_id,
         limit = query.limit,
         offset = query.offset,
+        after_account = ?query.after_account,
         "GET /v1/kv/writers"
     );
 
@@ -352,9 +386,10 @@ pub async fn writers_handler(
         .query_writers(&query)
         .await?;
 
+    let next_cursor = if has_more { entries.last().map(|e| e.predecessor_id.clone()) } else { None };
     let fields = parse_field_set(&query.fields);
-    let decode = query.decode.unwrap_or(false);
-    Ok(respond_paginated(entries, has_more, truncated, &fields, decode))
+    let decode = should_decode(&query.value_format, &query.decode)?;
+    Ok(respond_paginated(entries, has_more, truncated, &fields, decode, next_cursor))
 }
 
 /// List unique writer accounts for a contract.
@@ -382,9 +417,20 @@ pub async fn accounts_handler(
 ) -> Result<HttpResponse, ApiError> {
     validate_account_id(&query.contract_id, "contractId")?;
     validate_limit(query.limit)?;
-    validate_offset(query.offset)?;
     if let Some(ref key) = query.key {
         validate_key(key, "key", MAX_KEY_LENGTH)?;
+    }
+
+    // Validate cursor vs offset conflict
+    if let Some(ref cursor) = query.after_account {
+        validate_account_id(cursor, "after_account")?;
+        if query.offset > 0 {
+            return Err(ApiError::InvalidParameter(
+                "cannot use both 'after_account' cursor and 'offset'".to_string(),
+            ));
+        }
+    } else {
+        validate_offset(query.offset)?;
     }
 
     tracing::info!(
@@ -393,6 +439,7 @@ pub async fn accounts_handler(
         key = ?query.key,
         limit = query.limit,
         offset = query.offset,
+        after_account = ?query.after_account,
         "GET /v1/kv/accounts"
     );
 
@@ -403,13 +450,22 @@ pub async fn accounts_handler(
             query.key.as_deref(),
             query.limit,
             query.offset,
+            query.after_account.as_deref(),
         )
         .await?;
+
+    let next_cursor = if has_more { accounts.last().cloned() } else { None };
+    let meta = PaginationMeta {
+        has_more,
+        truncated,
+        next_cursor,
+    };
 
     Ok(HttpResponse::Ok().json(PaginatedResponse {
         data: accounts,
         has_more,
         truncated,
+        meta,
     }))
 }
 
@@ -419,7 +475,7 @@ pub async fn accounts_handler(
     path = "/v1/kv/diff",
     params(DiffParams),
     responses(
-        (status = 200, description = "Values at both block heights", body = DiffResponse),
+        (status = 200, description = "Values at both block heights"),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -455,7 +511,7 @@ pub async fn diff_kv_handler(
     ).await?;
 
     let fields = parse_field_set(&query.fields);
-    let decode = query.decode.unwrap_or(false);
+    let decode = should_decode(&query.value_format, &query.decode)?;
     if fields.is_some() || decode {
         let mut a_json = a.as_ref().map(|e| e.to_json_with_fields(&fields));
         let mut b_json = b.as_ref().map(|e| e.to_json_with_fields(&fields));
@@ -463,9 +519,9 @@ pub async fn diff_kv_handler(
             if let Some(ref mut v) = a_json { decode_value_in_json(v); }
             if let Some(ref mut v) = b_json { decode_value_in_json(v); }
         }
-        Ok(HttpResponse::Ok().json(serde_json::json!({ "a": a_json, "b": b_json })))
+        Ok(HttpResponse::Ok().json(serde_json::json!({ "data": { "a": a_json, "b": b_json } })))
     } else {
-        Ok(HttpResponse::Ok().json(DiffResponse { a, b }))
+        Ok(HttpResponse::Ok().json(serde_json::json!({ "data": DiffResponse { a, b } })))
     }
 }
 
@@ -527,9 +583,10 @@ pub async fn timeline_kv_handler(
         .get_kv_timeline(&query)
         .await?;
 
+    let next_cursor = if has_more { entries.last().map(|e| e.block_height.to_string()) } else { None };
     let fields = parse_field_set(&query.fields);
-    let decode = query.decode.unwrap_or(false);
-    Ok(respond_paginated(entries, has_more, truncated, &fields, decode))
+    let decode = should_decode(&query.value_format, &query.decode)?;
+    Ok(respond_paginated(entries, has_more, truncated, &fields, decode, next_cursor))
 }
 
 /// Batch lookup: get values for multiple keys in a single request
@@ -675,10 +732,18 @@ pub async fn edges_handler(
         )
         .await?;
 
+    let next_cursor = if has_more { sources.last().map(|e| e.source.clone()) } else { None };
+    let meta = PaginationMeta {
+        has_more,
+        truncated: false,
+        next_cursor,
+    };
+
     Ok(HttpResponse::Ok().json(PaginatedResponse {
         data: sources,
         has_more,
         truncated: false,
+        meta,
     }))
 }
 
@@ -745,4 +810,3 @@ pub async fn status_handler(
         timestamp: chrono::Utc::now().to_rfc3339(),
     })
 }
-
