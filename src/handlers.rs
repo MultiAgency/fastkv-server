@@ -255,7 +255,7 @@ pub async fn query_kv_handler(
         return Ok(HttpResponse::Ok().json(TreeResponse { tree }));
     }
 
-    let next_cursor = if has_more { entries.last().map(|e| e.key.clone()) } else { None };
+    let next_cursor = entries.last().map(|e| e.key.clone());
     let meta = PaginationMeta { has_more, truncated: false, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
@@ -320,7 +320,7 @@ pub async fn history_kv_handler(
         .get_kv_history(&query)
         .await?;
 
-    let next_cursor = if has_more { entries.last().map(|e| e.block_height.to_string()) } else { None };
+    let next_cursor = entries.last().map(|e| e.block_height.to_string());
     let meta = PaginationMeta { has_more, truncated, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
@@ -378,7 +378,7 @@ pub async fn writers_handler(
         .query_writers(&query)
         .await?;
 
-    let next_cursor = if has_more { entries.last().map(|e| e.predecessor_id.clone()) } else { None };
+    let next_cursor = entries.last().map(|e| e.predecessor_id.clone());
     let meta = PaginationMeta { has_more, truncated, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
@@ -446,7 +446,7 @@ pub async fn accounts_handler(
         )
         .await?;
 
-    let next_cursor = if has_more { accounts.last().cloned() } else { None };
+    let next_cursor = accounts.last().cloned();
     let meta = PaginationMeta {
         has_more,
         truncated,
@@ -573,7 +573,7 @@ pub async fn timeline_kv_handler(
         .get_kv_timeline(&query)
         .await?;
 
-    let next_cursor = if has_more { entries.last().map(|e| e.block_height.to_string()) } else { None };
+    let next_cursor = entries.last().map(|e| e.block_height.to_string());
     let meta = PaginationMeta { has_more, truncated, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
@@ -723,7 +723,7 @@ pub async fn edges_handler(
         )
         .await?;
 
-    let next_cursor = if has_more { sources.last().map(|e| e.source.clone()) } else { None };
+    let next_cursor = sources.last().map(|e| e.source.clone());
     let meta = PaginationMeta {
         has_more,
         truncated: false,

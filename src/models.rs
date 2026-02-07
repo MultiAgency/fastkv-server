@@ -343,8 +343,8 @@ fn default_order_desc() -> String {
     "desc".to_string()
 }
 
-// Accounts query parameters (list unique predecessors for a current_account_id + key pattern)
-#[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
+// Internal accounts query parameters (used by social handlers, not exposed in API)
+#[derive(Deserialize, Clone)]
 pub struct AccountsParams {
     #[serde(rename = "contractId")]
     pub current_account_id: String,
@@ -795,5 +795,18 @@ mod tests {
         let json = serde_json::to_value(&meta_no_cursor).unwrap();
         assert_eq!(json["truncated"], true);
         assert!(json.get("next_cursor").is_none()); // skipped when None
+    }
+
+    #[test]
+    fn test_pagination_meta_cursor_without_has_more() {
+        let meta = PaginationMeta {
+            has_more: false,
+            truncated: false,
+            next_cursor: Some("last_key".to_string()),
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["has_more"], false);
+        assert!(json.get("truncated").is_none());
+        assert_eq!(json["next_cursor"], "last_key");
     }
 }

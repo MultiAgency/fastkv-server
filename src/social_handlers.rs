@@ -786,7 +786,7 @@ pub async fn social_followers_handler(
 
     let (accounts, has_more) = scylladb.query_accounts(&params).await?;
     let count = accounts.len();
-    let next_cursor = if has_more { accounts.last().cloned() } else { None };
+    let next_cursor = accounts.last().cloned();
 
     Ok(HttpResponse::Ok().json(SocialFollowResponse {
         accounts,
@@ -856,7 +856,7 @@ pub async fn social_following_handler(
         .filter_map(|e| e.key.strip_prefix("graph/follow/").map(|s| s.to_string()))
         .collect();
     let count = accounts.len();
-    let next_cursor = if has_more { accounts.last().cloned() } else { None };
+    let next_cursor = accounts.last().cloned();
 
     Ok(HttpResponse::Ok().json(SocialFollowResponse {
         accounts,
