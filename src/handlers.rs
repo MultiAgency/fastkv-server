@@ -30,18 +30,10 @@ fn decode_value_in_json(json: &mut serde_json::Value) {
 
 fn respond_paginated(
     entries: Vec<KvEntry>,
-    has_more: bool,
-    truncated: bool,
+    meta: PaginationMeta,
     fields: &Option<HashSet<String>>,
     decode: bool,
-    next_cursor: Option<String>,
 ) -> HttpResponse {
-    let meta = PaginationMeta {
-        has_more,
-        truncated,
-        next_cursor,
-    };
-
     if fields.is_some() || decode {
         let filtered: Vec<_> = entries
             .into_iter()
@@ -53,16 +45,10 @@ fn respond_paginated(
                 json
             })
             .collect();
-        let mut resp = serde_json::json!({ "data": filtered, "has_more": has_more, "meta": meta });
-        if truncated {
-            resp["truncated"] = serde_json::json!(true);
-        }
-        HttpResponse::Ok().json(resp)
+        HttpResponse::Ok().json(serde_json::json!({ "data": filtered, "meta": meta }))
     } else {
         HttpResponse::Ok().json(PaginatedResponse {
             data: entries,
-            has_more,
-            truncated,
             meta,
         })
     }
@@ -157,7 +143,7 @@ pub async fn health_check(app_state: web::Data<AppState>) -> Result<HttpResponse
     path = "/v1/kv/get",
     params(GetParams),
     responses(
-        (status = 200, description = "Entry found or null if not found"),
+        (status = 200, description = "Entry found or null if not found", body = inline(DataResponse<Option<KvEntry>>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -189,13 +175,17 @@ pub async fn get_kv_handler(
     let decode = should_decode(&query.value_format, &query.decode)?;
     match entry {
         Some(entry) => {
-            let mut json = entry.to_json_with_fields(&fields);
-            if decode {
-                decode_value_in_json(&mut json);
+            if fields.is_some() || decode {
+                let mut json = entry.to_json_with_fields(&fields);
+                if decode {
+                    decode_value_in_json(&mut json);
+                }
+                Ok(HttpResponse::Ok().json(serde_json::json!({ "data": json })))
+            } else {
+                Ok(HttpResponse::Ok().json(DataResponse { data: Some(entry) }))
             }
-            Ok(HttpResponse::Ok().json(serde_json::json!({ "data": json })))
         }
-        None => Ok(HttpResponse::Ok().json(serde_json::json!({ "data": null }))),
+        None => Ok(HttpResponse::Ok().json(DataResponse { data: Option::<KvEntry>::None })),
     }
 }
 
@@ -205,7 +195,7 @@ pub async fn get_kv_handler(
     path = "/v1/kv/query",
     params(QueryParams),
     responses(
-        (status = 200, description = "List of matching entries"),
+        (status = 200, description = "List of matching entries", body = inline(PaginatedResponse<KvEntry>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -266,9 +256,10 @@ pub async fn query_kv_handler(
     }
 
     let next_cursor = if has_more { entries.last().map(|e| e.key.clone()) } else { None };
+    let meta = PaginationMeta { has_more, truncated: false, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
-    Ok(respond_paginated(entries, has_more, false, &fields, decode, next_cursor))
+    Ok(respond_paginated(entries, meta, &fields, decode))
 }
 
 /// Get historical versions of a KV entry
@@ -277,7 +268,7 @@ pub async fn query_kv_handler(
     path = "/v1/kv/history",
     params(HistoryParams),
     responses(
-        (status = 200, description = "List of historical entries"),
+        (status = 200, description = "List of historical entries", body = inline(PaginatedResponse<KvEntry>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -330,9 +321,10 @@ pub async fn history_kv_handler(
         .await?;
 
     let next_cursor = if has_more { entries.last().map(|e| e.block_height.to_string()) } else { None };
+    let meta = PaginationMeta { has_more, truncated, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
-    Ok(respond_paginated(entries, has_more, truncated, &fields, decode, next_cursor))
+    Ok(respond_paginated(entries, meta, &fields, decode))
 }
 
 /// Find all writers for a key under a contract, with optional account filter
@@ -341,7 +333,7 @@ pub async fn history_kv_handler(
     path = "/v1/kv/writers",
     params(WritersParams),
     responses(
-        (status = 200, description = "List of entries from writers"),
+        (status = 200, description = "List of entries from writers", body = inline(PaginatedResponse<KvEntry>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -387,9 +379,10 @@ pub async fn writers_handler(
         .await?;
 
     let next_cursor = if has_more { entries.last().map(|e| e.predecessor_id.clone()) } else { None };
+    let meta = PaginationMeta { has_more, truncated, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
-    Ok(respond_paginated(entries, has_more, truncated, &fields, decode, next_cursor))
+    Ok(respond_paginated(entries, meta, &fields, decode))
 }
 
 /// List unique writer accounts for a contract.
@@ -397,14 +390,13 @@ pub async fn writers_handler(
 /// Returns deduplicated predecessor accounts that have written to the given contract.
 /// Providing a `key` filter is recommended — omitting it scans the entire contract partition
 /// which can be expensive for large contracts. Results are capped at 100,000 unique accounts;
-/// if this limit is reached the response will include `"truncated": true`.
-/// The `count` field reflects the number of accounts in the current page, not the total.
+/// if this limit is reached the response will include `meta.truncated: true`.
 #[utoipa::path(
     get,
     path = "/v1/kv/accounts",
     params(AccountsQueryParams),
     responses(
-        (status = 200, description = "List of writer accounts"),
+        (status = 200, description = "List of writer accounts", body = inline(PaginatedResponse<String>)),
         (status = 400, description = "Invalid parameters", body = ApiError),
         (status = 503, description = "Database unavailable", body = ApiError),
     ),
@@ -463,8 +455,6 @@ pub async fn accounts_handler(
 
     Ok(HttpResponse::Ok().json(PaginatedResponse {
         data: accounts,
-        has_more,
-        truncated,
         meta,
     }))
 }
@@ -475,7 +465,7 @@ pub async fn accounts_handler(
     path = "/v1/kv/diff",
     params(DiffParams),
     responses(
-        (status = 200, description = "Values at both block heights"),
+        (status = 200, description = "Values at both block heights", body = inline(DataResponse<DiffResponse>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -521,7 +511,7 @@ pub async fn diff_kv_handler(
         }
         Ok(HttpResponse::Ok().json(serde_json::json!({ "data": { "a": a_json, "b": b_json } })))
     } else {
-        Ok(HttpResponse::Ok().json(serde_json::json!({ "data": DiffResponse { a, b } })))
+        Ok(HttpResponse::Ok().json(DataResponse { data: DiffResponse { a, b } }))
     }
 }
 
@@ -531,7 +521,7 @@ pub async fn diff_kv_handler(
     path = "/v1/kv/timeline",
     params(TimelineParams),
     responses(
-        (status = 200, description = "Chronological list of all writes"),
+        (status = 200, description = "Chronological list of all writes", body = inline(PaginatedResponse<KvEntry>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -584,9 +574,10 @@ pub async fn timeline_kv_handler(
         .await?;
 
     let next_cursor = if has_more { entries.last().map(|e| e.block_height.to_string()) } else { None };
+    let meta = PaginationMeta { has_more, truncated, next_cursor };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format, &query.decode)?;
-    Ok(respond_paginated(entries, has_more, truncated, &fields, decode, next_cursor))
+    Ok(respond_paginated(entries, meta, &fields, decode))
 }
 
 /// Batch lookup: get values for multiple keys in a single request
@@ -595,7 +586,7 @@ pub async fn timeline_kv_handler(
     path = "/v1/kv/batch",
     request_body = BatchQuery,
     responses(
-        (status = 200, description = "Batch results"),
+        (status = 200, description = "Batch results", body = inline(DataResponse<Vec<BatchResultItem>>)),
         (status = 400, description = "Invalid parameters", body = ApiError)
     ),
     tag = "kv"
@@ -676,7 +667,7 @@ pub async fn batch_kv_handler(
     .collect()
     .await;
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({ "data": items })))
+    Ok(HttpResponse::Ok().json(DataResponse { data: items }))
 }
 
 /// List edge sources for a given edge type and target
@@ -685,7 +676,7 @@ pub async fn batch_kv_handler(
     path = "/v1/kv/edges",
     params(EdgesParams),
     responses(
-        (status = 200, description = "List of edge sources"),
+        (status = 200, description = "List of edge sources", body = inline(PaginatedResponse<EdgeSourceEntry>)),
         (status = 400, description = "Invalid parameters", body = ApiError),
         (status = 503, description = "Database unavailable", body = ApiError),
     ),
@@ -741,8 +732,6 @@ pub async fn edges_handler(
 
     Ok(HttpResponse::Ok().json(PaginatedResponse {
         data: sources,
-        has_more,
-        truncated: false,
         meta,
     }))
 }
@@ -753,7 +742,7 @@ pub async fn edges_handler(
     path = "/v1/kv/edges/count",
     params(EdgesCountParams),
     responses(
-        (status = 200, description = "Edge count", body = EdgesCountResponse),
+        (status = 200, description = "Edge count", body = inline(DataResponse<EdgesCountResponse>)),
         (status = 400, description = "Invalid parameters", body = ApiError),
         (status = 503, description = "Database unavailable", body = ApiError),
     ),
@@ -779,10 +768,12 @@ pub async fn edges_count_handler(
         .count_edges(&query.edge_type, &query.target)
         .await?;
 
-    Ok(HttpResponse::Ok().json(EdgesCountResponse {
-        edge_type: query.edge_type.clone(),
-        target: query.target.clone(),
-        count,
+    Ok(HttpResponse::Ok().json(DataResponse {
+        data: EdgesCountResponse {
+            edge_type: query.edge_type.clone(),
+            target: query.target.clone(),
+            count,
+        },
     }))
 }
 

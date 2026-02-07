@@ -171,12 +171,15 @@ pub struct PaginationMeta {
 
 // Standardized paginated response for all list endpoints
 #[derive(Serialize, utoipa::ToSchema)]
-pub struct PaginatedResponse<T: Serialize> {
+pub struct PaginatedResponse<T: Serialize + utoipa::ToSchema> {
     pub data: Vec<T>,
-    pub has_more: bool,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
     pub meta: PaginationMeta,
+}
+
+// Standardized single-item response wrapper
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct DataResponse<T: Serialize + utoipa::ToSchema> {
+    pub data: T,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]

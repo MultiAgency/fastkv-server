@@ -65,7 +65,6 @@ use crate::models::PROJECT_ID;
         models::DiffParams,
         models::DiffResponse,
         models::TimelineParams,
-        models::AccountsParams,
         models::AccountsQueryParams,
         models::EdgesParams,
         models::EdgesCountParams,
