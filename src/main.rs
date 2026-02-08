@@ -235,6 +235,7 @@ async fn main() -> std::io::Result<()> {
             .max_age(3600);
 
         App::new()
+            .app_data(web::JsonConfig::default().limit(262_144))
             .app_data(web::Data::new(AppState {
                 scylladb: Arc::clone(&scylladb),
                 chain_id,

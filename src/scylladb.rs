@@ -8,7 +8,7 @@ use crate::models::{
     KvEntry, KvHistoryRow, KvRow, QueryParams, TimelineParams, WritersParams, MAX_DEDUP_SCAN,
     MAX_HISTORY_SCAN,
 };
-use crate::queries::{build_prefix_cursor_query, build_prefix_query};
+use crate::queries::compute_prefix_end;
 use fastnear_primitives::types::ChainId;
 use futures::stream::StreamExt;
 use futures::Stream;
@@ -146,6 +146,8 @@ pub struct ScyllaDb {
     edges_list: PreparedStatement,
     edges_list_cursor: PreparedStatement,
     edges_count: PreparedStatement,
+    prefix_query: PreparedStatement,
+    prefix_cursor_query: PreparedStatement,
     meta_query: PreparedStatement,
 
     pub scylla_session: Session,
@@ -364,6 +366,16 @@ impl ScyllaDb {
                 &format!("SELECT COUNT(*) FROM {} WHERE edge_type = ? AND target = ?", kv_edges_table_name),
                 scylla::frame::types::Consistency::LocalOne,
             ).await?,
+            prefix_query: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key >= ? AND key < ?", columns, table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
+            prefix_cursor_query: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key > ? AND key < ?", columns, table_name),
+                scylla::frame::types::Consistency::LocalOne,
+            ).await?,
             meta_query: Self::prepare_query(
                 &scylla_session,
                 "SELECT last_processed_block_height FROM meta WHERE suffix = ?",
@@ -488,7 +500,7 @@ impl ScyllaDb {
         )
         .await;
 
-        Ok((page.items, page.has_more, false, page.dropped_rows))
+        Ok((page.items, page.has_more, page.truncated, page.dropped_rows))
     }
 
     pub async fn query_accounts(
@@ -688,15 +700,14 @@ impl ScyllaDb {
         let mut rows_stream = match (&params.key_prefix, &params.after_key) {
             // Prefix + cursor: key > cursor AND key < prefix_end
             (Some(prefix), Some(cursor)) => {
-                let (stmt, cursor_start, prefix_end) =
-                    build_prefix_cursor_query(cursor, prefix, &self.table_name);
+                let prefix_end = compute_prefix_end(prefix);
                 self.scylla_session
-                    .query_iter(
-                        stmt,
+                    .execute_iter(
+                        self.prefix_cursor_query.clone(),
                         (
                             &params.predecessor_id,
                             &params.current_account_id,
-                            &cursor_start,
+                            cursor,
                             &prefix_end,
                         ),
                     )
@@ -705,14 +716,14 @@ impl ScyllaDb {
             }
             // Prefix only: key >= prefix AND key < prefix_end
             (Some(prefix), None) => {
-                let (stmt, prefix_start, prefix_end) = build_prefix_query(prefix, &self.table_name);
+                let prefix_end = compute_prefix_end(prefix);
                 self.scylla_session
-                    .query_iter(
-                        stmt,
+                    .execute_iter(
+                        self.prefix_query.clone(),
                         (
                             &params.predecessor_id,
                             &params.current_account_id,
-                            &prefix_start,
+                            prefix.as_str(),
                             &prefix_end,
                         ),
                     )
@@ -1085,6 +1096,18 @@ mod tests {
         let items: Vec<Result<i32, NextRowError>> = vec![];
         let mut s = futures::stream::iter(items);
         let page = collect_page(&mut s, 10, 0, None, Some).await;
+        assert!(page.items.is_empty());
+        assert!(!page.has_more);
+        assert!(!page.truncated);
+        assert_eq!(page.dropped_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn test_collect_page_all_filtered() {
+        // Every item filtered out by transform — result is empty, no has_more
+        let items: Vec<Result<i32, NextRowError>> = (1..=10).map(Ok).collect();
+        let mut s = futures::stream::iter(items);
+        let page: PageResult<i32> = collect_page(&mut s, 5, 0, None, |_| None).await;
         assert!(page.items.is_empty());
         assert!(!page.has_more);
         assert!(!page.truncated);

@@ -31,8 +31,8 @@ Consumer-facing docs: REFERENCE.md, runtime OpenAPI at `/docs` route.
   Must NOT: contain business logic or DB access
 
 - **queries.rs**
-  Owns: dynamic CQL for prefix queries (the only place dynamic CQL is allowed)
-  Must NOT: execute queries — it builds `Statement`s, scylladb.rs executes them
+  Owns: `compute_prefix_end()` — computes the exclusive upper bound for prefix range scans
+  Must NOT: build dynamic CQL or execute queries
 
 - **tree.rs**
   Owns: `build_tree()` — slash-delimited keys to nested JSON
@@ -98,7 +98,7 @@ pub async fn my_handler(
 
 These are load-bearing. Breaking any one breaks client pagination.
 
-1. **Overfetch by 1.** Query `limit + 1` rows. Got `limit + 1` back → `has_more = true`, then truncate to `limit`.
+1. **Overfetch by 1 (cursor endpoints).** Query `limit + 1` rows via `collect_page()` overfetch mode. Got `limit + 1` back → `has_more = true`, then truncate to `limit`. Applies to: query, writers, edges, accounts-scan. (`accounts-by-contract` uses manual overfetch with HashSet dedup, not `collect_page()`.) History/timeline use scan-cap mode instead (no overfetch; caller computes `has_more` after post-sort + slice).
 2. **Always emit `next_cursor`.** Set from the last item in the result, even when `has_more == false`. Clients use `next_cursor` as the resume token.
 3. **`truncated` only from scan caps.** `truncated: true` only when a scan/dedup cap was hit (10k rows for history/timeline, 100k unique accounts for accounts-by-contract). Writers streams without a cap — `truncated` is always false there. Never set `truncated` from normal limit+1 pagination.
 4. **`has_more` truthfulness.** Authoritative for cursor+limit endpoints. Best-effort when `truncated == true`. If `truncated` is true, treat `has_more` as unreliable; use `next_cursor` to resume.
@@ -134,8 +134,8 @@ Do not invent ad-hoc `serde_json::json!({...})` shapes for new endpoints. Use `P
 
 ## Prepared Statements
 
-- All new CQL must be prepared in `ScyllaDb::new()`. Single exception: prefix-bound queries in `queries.rs` (bounds vary per request).
-- Only `queries.rs` may build dynamic CQL. This is the only place.
+- All CQL must be prepared in `ScyllaDb::new()`. No exceptions.
+- `queries.rs` owns only `compute_prefix_end()` (bind param computation, not dynamic CQL).
 - Default consistency: `LocalOne`. Exceptions require justification (see `accounts_by_contract` for `LocalQuorum`).
 - All statements get 10s request timeout via `set_request_timeout`.
 
@@ -163,7 +163,7 @@ Full constant list in models.rs:1–20.
 
 ## Testing Contract
 
-- `cargo test` must pass (38 unit tests)
+- `cargo test` must pass (37 unit tests)
 - `cargo clippy` must pass
 - No ScyllaDB required — unit tests cover serde, validation, tree building, prefix computation
 - Do not add integration tests without discussion (requires live DB)
@@ -184,6 +184,6 @@ Full constant list in models.rs:1–20.
 - **REFERENCE.md** — Endpoint params, TS interfaces, env vars, cost ratings, prepared statement table
 - **https://fastdata.up.railway.app/docs** — OpenAPI spec via Scalar UI (auto-generated from utoipa annotations in main.rs)
 - **models.rs:1–18** — All constants
-- **scylladb.rs `collect_page()`** — Reusable paginated stream helper (overfetch + scan-cap modes). 7 unit tests.
-- **scylladb.rs:118–352** — ScyllaDb struct + all prepared statement initialization
+- **scylladb.rs `collect_page()`** — Reusable paginated stream helper (overfetch + scan-cap modes). 8 unit tests.
+- **scylladb.rs:131–393** — ScyllaDb struct + all prepared statement initialization
 - **main.rs** — `X-Indexer-Block` header middleware (cached `AtomicU64`, refreshed 5s); don't remove

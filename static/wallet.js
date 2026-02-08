@@ -26,9 +26,9 @@ async function initNear() {
 
   // If just returned from wallet redirect, check for plant intent
   if (walletIsSignedIn()) {
-    const pending = localStorage.getItem('near-garden-pending-plant');
+    const pending = sessionStorage.getItem('near-garden-pending-plant');
     if (pending) {
-      localStorage.removeItem('near-garden-pending-plant');
+      sessionStorage.removeItem('near-garden-pending-plant');
       try {
         const { keyPath, value } = JSON.parse(pending);
         setPlantFields(keyPath, value);
@@ -65,11 +65,19 @@ function renderWalletUI() {
   const container = document.getElementById('wallet-area');
   if (!container) return;
 
+  container.textContent = '';
+
   if (walletIsSignedIn()) {
     const accountId = walletGetAccountId();
-    container.innerHTML =
-      `<span class="wallet-account">${esc(accountId)}</span>` +
-      `<button type="button" class="wallet-btn disconnect" onclick="walletSignOut()">disconnect</button>`;
+    const span = document.createElement('span');
+    span.className = 'wallet-account';
+    span.textContent = accountId;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wallet-btn disconnect';
+    btn.textContent = 'disconnect';
+    btn.onclick = walletSignOut;
+    container.append(span, btn);
     // Auto-fill account field only if still on the default value
     const acctInput = document.getElementById('account-input');
     if (acctInput && acctInput.value === 'root.near') {
@@ -79,8 +87,12 @@ function renderWalletUI() {
     const plantBtn = document.getElementById('view-plant');
     if (plantBtn) plantBtn.hidden = false;
   } else {
-    container.innerHTML =
-      `<button type="button" class="wallet-btn connect" onclick="walletSignIn()">connect wallet</button>`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wallet-btn connect';
+    btn.textContent = 'connect wallet';
+    btn.onclick = walletSignIn;
+    container.append(btn);
     // Hide the plant tab
     const plantBtn = document.getElementById('view-plant');
     if (plantBtn) plantBtn.hidden = true;
@@ -176,7 +188,7 @@ async function plantData() {
   const args = { data: { [accountId]: nested } };
 
   // Save intent in case of redirect
-  localStorage.setItem('near-garden-pending-plant', JSON.stringify({ keyPath, value: valueInput.value }));
+  sessionStorage.setItem('near-garden-pending-plant', JSON.stringify({ keyPath, value: valueInput.value }));
 
   if (plantBtn) { plantBtn.disabled = true; plantBtn.textContent = '...'; }
   if (statusEl) statusEl.textContent = 'signing transaction...';
@@ -191,12 +203,12 @@ async function plantData() {
     });
 
     // If we get here (unlikely with redirect wallet), plant succeeded
-    localStorage.removeItem('near-garden-pending-plant');
+    sessionStorage.removeItem('near-garden-pending-plant');
     if (statusEl) statusEl.textContent = 'planted! waiting for indexer...';
     pollForIndexed(accountId, keyPath);
   } catch (e) {
     console.error('Plant failed:', e);
-    localStorage.removeItem('near-garden-pending-plant');
+    sessionStorage.removeItem('near-garden-pending-plant');
     const msg = e.message || 'unknown error';
     const isRejected = msg.includes('User denied') || msg.includes('rejected') || msg.includes('cancelled');
     if (statusEl) statusEl.textContent = isRejected ? 'transaction cancelled' : `failed: ${msg}`;
@@ -218,8 +230,13 @@ async function pollForIndexed(accountId, keyPath) {
         const json = await res.json();
         if (json.data) {
           if (statusEl) {
-            statusEl.innerHTML =
-              `indexed! <button type="button" class="plant-view-btn" onclick="viewPlantedData('${esc(accountId)}', '${esc(keyPath)}')">view in explorer</button>`;
+            statusEl.textContent = '';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'plant-view-btn';
+            btn.textContent = 'view in explorer';
+            btn.onclick = () => viewPlantedData(accountId, keyPath);
+            statusEl.append('indexed! ', btn);
           }
           if (plantBtn) { plantBtn.disabled = false; plantBtn.textContent = 'plant_'; }
           return;

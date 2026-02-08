@@ -8,7 +8,7 @@ use tokio::sync::RwLockReadGuard;
 use std::collections::HashSet;
 use std::time::Duration;
 
-const THROTTLE_CLEANUP_THRESHOLD: usize = 10_000;
+const THROTTLE_CLEANUP_THRESHOLD: usize = 1_000;
 const THROTTLE_EXPIRY: Duration = Duration::from_secs(600); // 10 minutes
 
 pub(crate) async fn require_db(
@@ -18,7 +18,9 @@ pub(crate) async fn require_db(
     if guard.is_none() {
         return Err(ApiError::DatabaseUnavailable);
     }
-    Ok(RwLockReadGuard::map(guard, |opt| opt.as_ref().unwrap()))
+    Ok(RwLockReadGuard::map(guard, |opt| {
+        opt.as_ref().expect("guarded by is_none check above")
+    }))
 }
 
 /// Attempt to JSON-decode the `"value"` field in a serialized entry.
@@ -126,7 +128,7 @@ pub(crate) fn validate_cursor_or_offset(
     Ok(())
 }
 
-fn validate_order(order: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_order(order: &str) -> Result<(), ApiError> {
     if !order.eq_ignore_ascii_case("asc") && !order.eq_ignore_ascii_case("desc") {
         return Err(ApiError::InvalidParameter(
             "order must be 'asc' or 'desc'".to_string(),
@@ -461,7 +463,8 @@ pub async fn accounts_handler(
     query: web::Query<AccountsQueryParams>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let is_scan = query.contract_id.is_none();
+    let contract_id = query.contract_id.as_deref();
+    let is_scan = contract_id.is_none();
 
     if is_scan {
         // Full table scan: require explicit opt-in
@@ -480,8 +483,8 @@ pub async fn accounts_handler(
                 "offset not supported without contractId; use after_account cursor".to_string(),
             ));
         }
-    } else {
-        validate_account_id(query.contract_id.as_deref().unwrap(), "contractId")?;
+    } else if let Some(cid) = contract_id {
+        validate_account_id(cid, "contractId")?;
     }
 
     let limit = if is_scan {
@@ -502,7 +505,9 @@ pub async fn accounts_handler(
         validate_account_id,
     )?;
 
-    // Per-IP throttle for scan requests
+    // Per-IP throttle for scan requests.
+    // Relies on a trusted reverse proxy (e.g. Railway) to set X-Forwarded-For;
+    // without one, clients can spoof the header to bypass the throttle.
     if is_scan {
         let ip = req
             .headers()
@@ -523,7 +528,10 @@ pub async fn accounts_handler(
                     .unwrap_or("unknown")
                     .to_string()
             });
-        let mut throttle = app_state.scan_throttle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut throttle = app_state
+            .scan_throttle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
         if throttle.len() > THROTTLE_CLEANUP_THRESHOLD {
             let cutoff = now - THROTTLE_EXPIRY;
@@ -552,20 +560,20 @@ pub async fn accounts_handler(
 
     let db = require_db(&app_state).await?;
 
-    let (accounts, has_more, truncated, dropped) = if is_scan {
-        let (accounts, has_more, dropped) = db
-            .query_all_accounts(limit, query.after_account.as_deref())
-            .await?;
-        (accounts, has_more, false, dropped)
-    } else {
+    let (accounts, has_more, truncated, dropped) = if let Some(cid) = contract_id {
         db.query_accounts_by_contract(
-            query.contract_id.as_deref().unwrap(),
+            cid,
             query.key.as_deref(),
             limit,
             query.offset,
             query.after_account.as_deref(),
         )
         .await?
+    } else {
+        let (accounts, has_more, dropped) = db
+            .query_all_accounts(limit, query.after_account.as_deref())
+            .await?;
+        (accounts, has_more, false, dropped)
     };
 
     let next_cursor = accounts.last().cloned();
@@ -601,6 +609,11 @@ pub async fn diff_kv_handler(
     validate_account_id(&query.predecessor_id, "accountId")?;
     validate_account_id(&query.current_account_id, "contractId")?;
     validate_key(&query.key, "key", MAX_KEY_LENGTH)?;
+    if query.block_height_a < 0 || query.block_height_b < 0 {
+        return Err(ApiError::InvalidParameter(
+            "block_height_a and block_height_b must be non-negative".to_string(),
+        ));
+    }
 
     tracing::info!(
         target: PROJECT_ID,

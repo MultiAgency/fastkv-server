@@ -31,7 +31,7 @@
 | `/v1/kv/batch` | POST | `batch_kv_handler` | `s_kv_last` | Cheap | N parallel PK lookups (max 100, 10 concurrent) |
 | `/v1/kv/query` | GET | `query_kv_handler` | `s_kv_last` | Moderate | `WHERE ... AND key >= ? AND key < ?` (prefix). **Risky** without `key_prefix` (full partition) |
 | `/v1/kv/history` | GET | `history_kv_handler` | `s_kv` | Cheap | `WHERE ... AND key=? AND block_height >= ? AND block_height <= ?` (CQL pushdown) |
-| `/v1/kv/writers` | GET | `writers_handler` | `mv_kv_cur_key` | Moderate | `WHERE current_account_id=? AND key=? ORDER BY ... DESC` + in-memory dedup (100k cap) |
+| `/v1/kv/writers` | GET | `writers_handler` | `kv_reverse` | Moderate | `WHERE current_account_id=? AND key=?` — streams partition (no dedup needed) |
 | `/v1/kv/accounts` | GET | `accounts_handler` | `kv_accounts` / `all_accounts` | Cheap/Risky | Cheap with `key` param (PK+CK). **Risky** without `key` (full partition + 100k dedup). Without `contractId` (`scan=1`): reads `all_accounts` table with TOKEN cursor, throttled 1 req/sec/IP |
 | `/v1/kv/diff` | GET | `diff_kv_handler` | `s_kv` | Moderate | 2 parallel PK+CK lookups at exact block heights |
 | `/v1/kv/timeline` | GET | `timeline_kv_handler` | `s_kv` | Risky | `WHERE predecessor_id=? AND current_account_id=?` — full partition, in-memory block filter + sort, 10k row cap |
@@ -139,7 +139,7 @@ Paginate using `from_block`/`to_block` range narrowing + `limit`.
 | `value_format` | string | no | `"raw"` | `"raw"` or `"json"` (decoded) |
 | `after_account` | string | no | | Cursor: return writers after this account (exclusive). Cannot combine with `offset > 0`. |
 
-Returns `PaginatedResponse<KvEntry>`. Deduplicates by `accountId` keeping newest entry (ORDER BY DESC). `meta.truncated: true` if dedup scan hit 100,000 unique writers.
+Returns `PaginatedResponse<KvEntry>`. Reads from `kv_reverse` table where rows are naturally unique per `predecessor_id` (no dedup needed). `meta.truncated` is always `false`.
 
 ### POST /v1/kv/batch
 
@@ -272,7 +272,7 @@ Returns nested JSON structure. Sets `X-Results-Truncated: true` header if trunca
 | `key` | string | yes | | Index key |
 | `order` | string | no | `"desc"` | `"asc"` or `"desc"` |
 | `limit` | int | no | 100 | Range 1–1000 |
-| `from` | int (u64) | no | | Block height cursor (excludes entries at/beyond this block) |
+| `from` | int (u64) | no | | Exclusive cursor (desc: skips entries >= `from`; asc: skips entries <= `from`) |
 | `account_id` | string | no | | Filter to account. Also accepts `accountId`. |
 | `contract_id` | string | no | | Override default contract |
 
@@ -619,6 +619,7 @@ interface SocialAccountFeedParams {
 | `KV_ACCOUNTS_TABLE_NAME` | `kv_accounts` | Contract-to-writer mappings |
 | `ALL_ACCOUNTS_TABLE_NAME` | `all_accounts` | Unique accounts table (`predecessor_id text PRIMARY KEY`). Used by `scan=1`. |
 | `KV_EDGES_TABLE_NAME` | `kv_edges` | Reverse edge lookup table |
+| `KV_REVERSE_TABLE_NAME` | `kv_reverse` | Reverse lookup by (contract, key) → writers |
 | `PORT` | `3001` | Server listen port |
 | `DB_RECONNECT_INTERVAL_SECS` | `5` | Background reconnection interval (5–300s, exponential backoff) |
 | `SOCIAL_CONTRACT` | `social.near` | Default contract for social API endpoints |
@@ -652,6 +653,11 @@ all_accounts    PRIMARY KEY (predecessor_id)
 kv_edges        PRIMARY KEY ((edge_type, target), source)
                 → block_height
                 Reverse edge lookup: find all sources for an (edge_type, target).
+
+kv_reverse      PRIMARY KEY ((current_account_id, key), predecessor_id)
+                → value, block_height, block_timestamp, receipt_id, tx_hash
+                Reverse lookup: find all writers for a (contract, key). Used by /kv/writers,
+                /social/followers (via social handlers).
 ```
 
 ---
@@ -677,26 +683,30 @@ kv_edges        PRIMARY KEY ((edge_type, target), source)
 
 ## Prepared Statements
 
-14 statements prepared at startup. All use `LocalOne` consistency and 10s timeout unless noted.
+20 statements prepared at startup. All use `LocalOne` consistency and 10s timeout unless noted.
 
 | Name | Table | CQL Summary | Used By |
 |---|---|---|---|
 | `get_kv` | `s_kv_last` | PK lookup (3-col) | `/kv/get` |
 | `get_kv_last` | `s_kv_last` | Value-only PK lookup | `/kv/batch` |
 | `query_kv_no_prefix` | `s_kv_last` | Full partition (2-col PK) | `/kv/query` (no prefix) |
-| `reverse_kv` | `mv_kv_cur_key` | PK + ORDER BY DESC | `/kv/writers`, social index, social get/keys (wildcard account) |
+| `query_kv_cursor` | `s_kv_last` | `key > ?` (cursor, no prefix) | `/kv/query` (cursor, no prefix) |
+| `prefix_query` | `s_kv_last` | `key >= ? AND key < ?` | `/kv/query` (prefix, no cursor) |
+| `prefix_cursor_query` | `s_kv_last` | `key > ? AND key < ?` | `/kv/query` (prefix + cursor) |
+| `reverse_kv` | `mv_kv_cur_key` | PK + ORDER BY DESC | social index, social get/keys (wildcard account) |
+| `reverse_list` | `kv_reverse` | Full partition (2-col PK) | `/kv/writers` (no cursor) |
+| `reverse_list_cursor` | `kv_reverse` | PK + `predecessor_id > ?` | `/kv/writers` (with cursor) |
 | `get_kv_history` | `s_kv` | PK + `block_height >= ? AND <= ?` | `/kv/history`, `/social/feed/account` |
 | `get_kv_at_block` | `s_kv` | PK + exact block | `/kv/diff` |
 | `get_kv_timeline` | `s_kv` | Full partition (2-col PK) | `/kv/timeline` |
-| `accounts_by_key` | `mv_kv_cur_key` | PK + ORDER BY DESC | `/social/followers` |
 | `accounts_by_contract` | `kv_accounts` | Full partition (**LocalQuorum**) | `/kv/accounts` (no key) |
 | `accounts_by_contract_key` | `kv_accounts` | PK+CK lookup (**LocalQuorum**) | `/kv/accounts` (with key) |
+| `accounts_all` | `all_accounts` | Full table scan (**LocalQuorum**) | `/kv/accounts` (scan=1, no cursor) |
+| `accounts_all_cursor` | `all_accounts` | `TOKEN(predecessor_id) > TOKEN(?)` (**LocalQuorum**) | `/kv/accounts` (scan=1, with cursor) |
 | `edges_list` | `kv_edges` | Full partition | `/kv/edges` (no cursor) |
 | `edges_list_cursor` | `kv_edges` | PK + `source > ?` | `/kv/edges` (with cursor) |
 | `edges_count` | `kv_edges` | `COUNT(*)` full partition | `/kv/edges/count` |
 | `meta_query` | `meta` | Single-row PK lookup | `/v1/status` |
-
-**Dynamic CQL (not prepared):** `build_prefix_query()` in `queries.rs` generates `WHERE key >= ? AND key < ?` per request. Table name string-interpolated but validated at startup via `validate_identifier()`.
 
 ---
 
@@ -708,18 +718,17 @@ kv_edges        PRIMARY KEY ((edge_type, target), source)
 
 2. **`/v1/kv/timeline` does not push `from_block`/`to_block` to CQL.** The `get_kv_timeline` prepared statement has no block-height WHERE clause — filtering happens in-memory after a full partition scan. For active accounts, this scans up to 10,000 rows regardless of the block range requested.
 
-3. **Prefix queries are not prepared statements.** `build_prefix_query()` creates a fresh `Statement` per request. This means ScyllaDB cannot cache the query plan. For high-throughput prefix queries, this adds parsing overhead on every call.
-
 ### Performance Risks
 
 | Endpoint | Risk | Trigger | Mitigation |
 |---|---|---|---|
 | `/v1/kv/query` | Full partition scan | Missing `key_prefix` | Always provide `key_prefix` |
 | `/v1/kv/timeline` | Full partition + in-memory filter/sort | Any call | Capped at 10,000 rows (`truncated: true`) |
-| `/v1/kv/accounts` | Full partition + 100k dedup | Missing `key` param | Always provide `key` |
+| `/v1/kv/accounts` (contract) | Full partition + 100k dedup | Missing `key` param | Always provide `key` |
+| `/v1/kv/accounts` (scan) | Full table TOKEN scan | `scan=1` without `contractId` | Throttled 1 req/sec per IP, max 1000 rows |
 | `/v1/kv/edges` | Full partition + offset | Missing `after_source` cursor | Use cursor-based pagination |
 | `/v1/kv/edges/count` | Full partition `COUNT(*)` | Any call | No mitigation; consider caching |
-| `/v1/kv/writers` | 100k dedup scan | Popular keys (many writers) | Capped at 100,000 unique writers |
+| `/v1/kv/writers` | Full partition stream | Popular keys (many writers) | Use cursor pagination with tight `limit` |
 | `/v1/social/feed/account` | Two history queries when `include_replies=true` | `include_replies=true` | Still bounded by CQL block-height pushdown |
 | `/v1/social/get` (wildcard account `*/key`) | Reverse view full scan | Wildcard account pattern | Limit patterns per request (max 100) |
 
@@ -731,9 +740,10 @@ kv_edges        PRIMARY KEY ((edge_type, target), source)
 - **`X-Indexer-Block` header**: Added to every response by middleware, cached from `meta` table every 5s, exposed via CORS
 - **`meta.dropped_rows`**: Omitted when zero, present as integer when deserialization errors occur on KV endpoints
 - **`X-Dropped-Rows` header**: Set on social endpoints when deserialization errors occur (same semantics, header form)
-- **ORDER BY DESC dedup**: First occurrence kept = newest entry (writers, accounts)
+- **ORDER BY DESC dedup**: First occurrence kept = newest entry (accounts-by-contract)
 - **`MAX_STREAM_ERRORS = 10`**: Defined in `models.rs:15`, used in `social_handlers.rs:165`
 - **Social handler validation parity**: `validate_offset()` applied to followers/following
-- **`validate_identifier()`**: Prevents CQL injection on all 5 table names + keyspace
+- **`validate_identifier()`**: Prevents CQL injection on all 7 table names + keyspace
 - **Error sanitization**: Generic client messages, full context in server logs
 - **DB resilience**: Optional connection with exponential backoff reconnection (5–300s)
+- **Prefix queries prepared at startup**: `prefix_query` and `prefix_cursor_query` are prepared statements (no per-request parsing overhead)

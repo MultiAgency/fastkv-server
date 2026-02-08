@@ -1,7 +1,7 @@
 use actix_web::{get, post, web, HttpResponse};
 use futures::stream::StreamExt;
 
-use crate::handlers::{require_db, validate_account_id, validate_cursor_or_offset};
+use crate::handlers::{require_db, validate_account_id, validate_cursor_or_offset, validate_order};
 use crate::models::*;
 use crate::tree::build_tree;
 use crate::AppState;
@@ -132,8 +132,8 @@ struct IndexQuery<'a> {
     account_id: Option<&'a str>,
 }
 
-/// Returns (entries, dropped_rows).
-async fn query_index(q: IndexQuery<'_>) -> Result<(Vec<IndexEntry>, usize), ApiError> {
+/// Returns (entries, dropped_rows, timed_out).
+async fn query_index(q: IndexQuery<'_>) -> Result<(Vec<IndexEntry>, usize, bool), ApiError> {
     let IndexQuery {
         app_state,
         contract_id,
@@ -213,13 +213,14 @@ async fn query_index(q: IndexQuery<'_>) -> Result<(Vec<IndexEntry>, usize), ApiE
     )
     .await;
 
-    match stream_result {
-        Ok(Ok(())) => {}
+    let timed_out = match stream_result {
+        Ok(Ok(())) => false,
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             tracing::warn!(target: PROJECT_ID, "query_index stream timed out after 30s, returning partial results");
+            true
         }
-    }
+    };
 
     // Sort by block_height
     if order == "asc" {
@@ -229,7 +230,7 @@ async fn query_index(q: IndexQuery<'_>) -> Result<(Vec<IndexEntry>, usize), ApiE
     }
 
     entries.truncate(limit);
-    Ok((entries, error_count))
+    Ok((entries, error_count, timed_out))
 }
 
 // ===== Handlers =====
@@ -738,22 +739,36 @@ pub async fn social_index_handler(
             "action cannot be empty".to_string(),
         ));
     }
+    if query.action.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(format!(
+            "action cannot exceed {} characters",
+            MAX_KEY_LENGTH
+        )));
+    }
     if query.key.is_empty() {
         return Err(ApiError::InvalidParameter(
             "key cannot be empty".to_string(),
         ));
     }
+    if query.key.len() > MAX_KEY_LENGTH {
+        return Err(ApiError::InvalidParameter(format!(
+            "key cannot exceed {} characters",
+            MAX_KEY_LENGTH
+        )));
+    }
     validate_limit(query.limit)?;
+    validate_order(&query.order)?;
+    let order = query.order.to_ascii_lowercase();
     let contract = resolve_contract(&query.contract_id)?;
 
     tracing::info!(target: PROJECT_ID, action = %query.action, key = %query.key, contract_id = %contract, "GET /v1/social/index");
 
-    let (entries, dropped) = query_index(IndexQuery {
+    let (entries, dropped, timed_out) = query_index(IndexQuery {
         app_state: &app_state,
         contract_id: contract,
         action: &query.action,
         key: &query.key,
-        order: &query.order,
+        order: &order,
         limit: query.limit,
         from: query.from,
         account_id: query.account_id.as_deref(),
@@ -763,6 +778,9 @@ pub async fn social_index_handler(
     let mut response = HttpResponse::Ok();
     if dropped > 0 {
         response.insert_header(("X-Dropped-Rows", dropped.to_string()));
+    }
+    if timed_out {
+        response.insert_header(("X-Results-Truncated", "true"));
     }
     Ok(response.json(IndexResponse { entries }))
 }
@@ -963,13 +981,29 @@ pub async fn social_account_feed_handler(
 ) -> Result<HttpResponse, ApiError> {
     validate_account_id(&query.account_id, "account_id")?;
     validate_limit(query.limit)?;
+    validate_order(&query.order)?;
+    let order = query.order.to_ascii_lowercase();
     let contract = resolve_contract(&query.contract_id)?;
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, "GET /v1/social/feed/account");
 
     let scylladb = require_db(&app_state).await?;
-    let from_block = query.from.map(|f| i64::try_from(f).unwrap_or(i64::MAX));
     let include_replies = query.include_replies.unwrap_or(false);
+
+    // `from` is an exclusive cursor: skip the boundary block to avoid duplicates.
+    // For desc (newest-first), cap the upper bound; for asc, raise the lower bound.
+    let is_desc = order != "asc";
+    let (from_block, to_block) = match query.from {
+        Some(f) => {
+            let b = i64::try_from(f).unwrap_or(i64::MAX);
+            if is_desc {
+                (None, Some(b.saturating_sub(1)))
+            } else {
+                (Some(b.saturating_add(1)), None)
+            }
+        }
+        None => (None, None),
+    };
 
     let to_index_entry = |e: KvEntry| IndexEntry {
         account_id: e.predecessor_id,
@@ -985,7 +1019,7 @@ pub async fn social_account_feed_handler(
         limit: query.limit,
         order: query.order.clone(),
         from_block,
-        to_block: None,
+        to_block,
         fields: None,
         value_format: None,
     };
@@ -997,7 +1031,7 @@ pub async fn social_account_feed_handler(
         limit: query.limit,
         order: query.order.clone(),
         from_block,
-        to_block: None,
+        to_block,
         fields: None,
         value_format: None,
     };
@@ -1020,7 +1054,7 @@ pub async fn social_account_feed_handler(
             .map(to_index_entry)
             .collect();
 
-        if query.order == "asc" {
+        if order == "asc" {
             combined.sort_by_key(|e| e.block_height);
         } else {
             combined.sort_by(|a, b| b.block_height.cmp(&a.block_height));
