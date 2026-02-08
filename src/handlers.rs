@@ -1,13 +1,19 @@
-use actix_web::{get, post, web, HttpResponse};
 use crate::models::*;
 use crate::scylladb::ScyllaDb;
 use crate::tree::build_tree;
 use crate::AppState;
+use actix_web::{get, post, web, HttpRequest, HttpResponse};
 use tokio::sync::RwLockReadGuard;
 
 use std::collections::HashSet;
+use std::time::Duration;
 
-pub(crate) async fn require_db(state: &AppState) -> Result<RwLockReadGuard<'_, ScyllaDb>, ApiError> {
+const THROTTLE_CLEANUP_THRESHOLD: usize = 10_000;
+const THROTTLE_EXPIRY: Duration = Duration::from_secs(600); // 10 minutes
+
+pub(crate) async fn require_db(
+    state: &AppState,
+) -> Result<RwLockReadGuard<'_, ScyllaDb>, ApiError> {
     let guard = state.scylladb.read().await;
     if guard.is_none() {
         return Err(ApiError::DatabaseUnavailable);
@@ -20,7 +26,11 @@ pub(crate) async fn require_db(state: &AppState) -> Result<RwLockReadGuard<'_, S
 /// (e.g., `"\"Alice\""` becomes `"Alice"`, `"42"` becomes `42`).
 fn decode_value_in_json(json: &mut serde_json::Value) {
     if let Some(map) = json.as_object_mut() {
-        if let Some(raw) = map.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+        if let Some(raw) = map
+            .get("value")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        {
             if let Ok(decoded) = serde_json::from_str::<serde_json::Value>(&raw) {
                 map.insert("value".to_string(), decoded);
             }
@@ -56,33 +66,42 @@ fn respond_paginated(
 
 pub(crate) fn validate_account_id(value: &str, name: &str) -> Result<(), ApiError> {
     if value.is_empty() {
-        return Err(ApiError::InvalidParameter(format!("{} cannot be empty", name)));
+        return Err(ApiError::InvalidParameter(format!(
+            "{} cannot be empty",
+            name
+        )));
     }
     if value.len() > MAX_ACCOUNT_ID_LENGTH {
-        return Err(ApiError::InvalidParameter(
-            format!("{} cannot exceed {} characters", name, MAX_ACCOUNT_ID_LENGTH),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "{} cannot exceed {} characters",
+            name, MAX_ACCOUNT_ID_LENGTH
+        )));
     }
     Ok(())
 }
 
 pub(crate) fn validate_key(value: &str, name: &str, max_len: usize) -> Result<(), ApiError> {
     if value.is_empty() {
-        return Err(ApiError::InvalidParameter(format!("{} cannot be empty", name)));
+        return Err(ApiError::InvalidParameter(format!(
+            "{} cannot be empty",
+            name
+        )));
     }
     if value.len() > max_len {
-        return Err(ApiError::InvalidParameter(
-            format!("{} cannot exceed {} characters", name, max_len),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "{} cannot exceed {} characters",
+            name, max_len
+        )));
     }
     Ok(())
 }
 
 pub(crate) fn validate_offset(offset: usize) -> Result<(), ApiError> {
     if offset > MAX_OFFSET {
-        return Err(ApiError::InvalidParameter(
-            format!("offset cannot exceed {}", MAX_OFFSET),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "offset cannot exceed {}",
+            MAX_OFFSET
+        )));
     }
     Ok(())
 }
@@ -96,9 +115,10 @@ pub(crate) fn validate_cursor_or_offset(
     if let Some(c) = cursor {
         validate_cursor_fn(c, cursor_name)?;
         if offset > 0 {
-            return Err(ApiError::InvalidParameter(
-                format!("cannot use both '{}' cursor and 'offset'", cursor_name),
-            ));
+            return Err(ApiError::InvalidParameter(format!(
+                "cannot use both '{}' cursor and 'offset'",
+                cursor_name
+            )));
         }
     } else {
         validate_offset(offset)?;
@@ -139,9 +159,10 @@ fn validate_prefix(prefix: &Option<String>) -> Result<(), ApiError> {
             ));
         }
         if p.len() > MAX_PREFIX_LENGTH {
-            return Err(ApiError::InvalidParameter(
-                format!("key_prefix cannot exceed {} characters", MAX_PREFIX_LENGTH),
-            ));
+            return Err(ApiError::InvalidParameter(format!(
+                "key_prefix cannot exceed {} characters",
+                MAX_PREFIX_LENGTH
+            )));
         }
     }
     Ok(())
@@ -210,7 +231,8 @@ pub async fn get_kv_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let entry = db.get_kv(&query.predecessor_id, &query.current_account_id, &query.key)
+    let entry = db
+        .get_kv(&query.predecessor_id, &query.current_account_id, &query.key)
         .await?;
 
     // Apply field selection and optional value decoding
@@ -228,7 +250,9 @@ pub async fn get_kv_handler(
                 Ok(HttpResponse::Ok().json(DataResponse { data: Some(entry) }))
             }
         }
-        None => Ok(HttpResponse::Ok().json(DataResponse { data: Option::<KvEntry>::None })),
+        None => Ok(HttpResponse::Ok().json(DataResponse {
+            data: Option::<KvEntry>::None,
+        })),
     }
 }
 
@@ -253,7 +277,12 @@ pub async fn query_kv_handler(
     validate_limit(query.limit)?;
     validate_prefix(&query.key_prefix)?;
 
-    validate_cursor_or_offset(query.after_key.as_deref(), "after_key", query.offset, |c, n| validate_key(c, n, MAX_KEY_LENGTH))?;
+    validate_cursor_or_offset(
+        query.after_key.as_deref(),
+        "after_key",
+        query.offset,
+        |c, n| validate_key(c, n, MAX_KEY_LENGTH),
+    )?;
 
     if let Some(ref fmt) = query.format {
         if fmt != "tree" {
@@ -275,20 +304,21 @@ pub async fn query_kv_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let (entries, has_more, dropped) = db.query_kv_with_pagination(&query)
-        .await?;
+    let (entries, has_more, dropped) = db.query_kv_with_pagination(&query).await?;
 
     if query.format.as_deref() == Some("tree") {
-        let items: Vec<(String, String)> = entries
-            .into_iter()
-            .map(|e| (e.key, e.value))
-            .collect();
+        let items: Vec<(String, String)> = entries.into_iter().map(|e| (e.key, e.value)).collect();
         let tree = build_tree(&items);
         return Ok(HttpResponse::Ok().json(TreeResponse { tree }));
     }
 
     let next_cursor = entries.last().map(|e| e.key.clone());
-    let meta = PaginationMeta { has_more, truncated: false, next_cursor, dropped_rows: dropped_to_option(dropped) };
+    let meta = PaginationMeta {
+        has_more,
+        truncated: false,
+        next_cursor,
+        dropped_rows: dropped_to_option(dropped),
+    };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format)?;
     Ok(respond_paginated(entries, meta, &fields, decode))
@@ -334,11 +364,15 @@ pub async fn history_kv_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let (entries, has_more, truncated, dropped) = db.get_kv_history(&query)
-        .await?;
+    let (entries, has_more, truncated, dropped) = db.get_kv_history(&query).await?;
 
     let next_cursor = entries.last().map(|e| e.block_height.to_string());
-    let meta = PaginationMeta { has_more, truncated, next_cursor, dropped_rows: dropped_to_option(dropped) };
+    let meta = PaginationMeta {
+        has_more,
+        truncated,
+        next_cursor,
+        dropped_rows: dropped_to_option(dropped),
+    };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format)?;
     Ok(respond_paginated(entries, meta, &fields, decode))
@@ -367,7 +401,12 @@ pub async fn writers_handler(
         validate_account_id(pred, "accountId")?;
     }
 
-    validate_cursor_or_offset(query.after_account.as_deref(), "after_account", query.offset, validate_account_id)?;
+    validate_cursor_or_offset(
+        query.after_account.as_deref(),
+        "after_account",
+        query.offset,
+        validate_account_id,
+    )?;
 
     tracing::info!(
         target: PROJECT_ID,
@@ -381,22 +420,29 @@ pub async fn writers_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let (entries, has_more, truncated, dropped) = db.query_writers(&query)
-        .await?;
+    let (entries, has_more, truncated, dropped) = db.query_writers(&query).await?;
 
     let next_cursor = entries.last().map(|e| e.predecessor_id.clone());
-    let meta = PaginationMeta { has_more, truncated, next_cursor, dropped_rows: dropped_to_option(dropped) };
+    let meta = PaginationMeta {
+        has_more,
+        truncated,
+        next_cursor,
+        dropped_rows: dropped_to_option(dropped),
+    };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format)?;
     Ok(respond_paginated(entries, meta, &fields, decode))
 }
 
-/// List unique writer accounts for a contract.
+/// List unique writer accounts for a contract (or across all contracts with `scan=1`).
 ///
 /// Returns deduplicated predecessor accounts that have written to the given contract.
 /// Providing a `key` filter is recommended — omitting it scans the entire contract partition
 /// which can be expensive for large contracts. Results are capped at 100,000 unique accounts;
 /// if this limit is reached the response will include `meta.truncated: true`.
+///
+/// When `contractId` is omitted, `scan=1` is required. This performs an expensive full table
+/// scan across all contracts, throttled to 1 req/sec per IP. Limit is clamped to 1,000.
 #[utoipa::path(
     get,
     path = "/v1/kv/accounts",
@@ -404,42 +450,123 @@ pub async fn writers_handler(
     responses(
         (status = 200, description = "List of writer accounts", body = inline(PaginatedResponse<String>)),
         (status = 400, description = "Invalid parameters", body = ApiError),
+        (status = 429, description = "Too many scan requests", body = ApiError),
         (status = 503, description = "Database unavailable", body = ApiError),
     ),
     tag = "kv"
 )]
 #[get("/v1/kv/accounts")]
 pub async fn accounts_handler(
+    req: HttpRequest,
     query: web::Query<AccountsQueryParams>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    validate_account_id(&query.contract_id, "contractId")?;
-    validate_limit(query.limit)?;
+    let is_scan = query.contract_id.is_none();
+
+    if is_scan {
+        // Full table scan: require explicit opt-in
+        if query.scan != Some(1) {
+            return Err(ApiError::InvalidParameter(
+                "contractId is optional but requires scan=1 (expensive).".to_string(),
+            ));
+        }
+        if query.key.is_some() {
+            return Err(ApiError::InvalidParameter(
+                "key filter requires contractId".to_string(),
+            ));
+        }
+        if query.offset > 0 {
+            return Err(ApiError::InvalidParameter(
+                "offset not supported without contractId; use after_account cursor".to_string(),
+            ));
+        }
+    } else {
+        validate_account_id(query.contract_id.as_deref().unwrap(), "contractId")?;
+    }
+
+    let limit = if is_scan {
+        query.limit.min(MAX_SCAN_LIMIT)
+    } else {
+        query.limit
+    };
+    validate_limit(limit)?;
+
     if let Some(ref key) = query.key {
         validate_key(key, "key", MAX_KEY_LENGTH)?;
     }
 
-    validate_cursor_or_offset(query.after_account.as_deref(), "after_account", query.offset, validate_account_id)?;
+    validate_cursor_or_offset(
+        query.after_account.as_deref(),
+        "after_account",
+        query.offset,
+        validate_account_id,
+    )?;
+
+    // Per-IP throttle for scan requests
+    if is_scan {
+        let ip = req
+            .headers()
+            .get("X-Forwarded-For")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && *s != "unknown")
+            .map(|s| s.to_string())
+            .or_else(|| {
+                req.connection_info()
+                    .realip_remote_addr()
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| {
+                req.connection_info()
+                    .peer_addr()
+                    .unwrap_or("unknown")
+                    .to_string()
+            });
+        let mut throttle = app_state.scan_throttle.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if throttle.len() > THROTTLE_CLEANUP_THRESHOLD {
+            let cutoff = now - THROTTLE_EXPIRY;
+            throttle.retain(|_, ts| *ts > cutoff);
+        }
+        if let Some(last) = throttle.get(&ip) {
+            if now.duration_since(*last) < std::time::Duration::from_secs(1) {
+                return Err(ApiError::TooManyRequests(
+                    "Too many scan requests. Try again shortly.".to_string(),
+                ));
+            }
+        }
+        throttle.insert(ip, now);
+    }
 
     tracing::info!(
         target: PROJECT_ID,
-        contractId = %query.contract_id,
+        contractId = ?query.contract_id,
+        scan = is_scan,
         key = ?query.key,
-        limit = query.limit,
+        limit = limit,
         offset = query.offset,
         after_account = ?query.after_account,
         "GET /v1/kv/accounts"
     );
 
     let db = require_db(&app_state).await?;
-    let (accounts, has_more, truncated, dropped) = db.query_accounts_by_contract(
-            &query.contract_id,
+
+    let (accounts, has_more, truncated, dropped) = if is_scan {
+        let (accounts, has_more, dropped) = db
+            .query_all_accounts(limit, query.after_account.as_deref())
+            .await?;
+        (accounts, has_more, false, dropped)
+    } else {
+        db.query_accounts_by_contract(
+            query.contract_id.as_deref().unwrap(),
             query.key.as_deref(),
-            query.limit,
+            limit,
             query.offset,
             query.after_account.as_deref(),
         )
-        .await?;
+        .await?
+    };
 
     let next_cursor = accounts.last().cloned();
     let meta = PaginationMeta {
@@ -488,12 +615,19 @@ pub async fn diff_kv_handler(
     let db = require_db(&app_state).await?;
     let (a, b) = futures::future::try_join(
         db.get_kv_at_block(
-            &query.predecessor_id, &query.current_account_id, &query.key, query.block_height_a,
+            &query.predecessor_id,
+            &query.current_account_id,
+            &query.key,
+            query.block_height_a,
         ),
         db.get_kv_at_block(
-            &query.predecessor_id, &query.current_account_id, &query.key, query.block_height_b,
+            &query.predecessor_id,
+            &query.current_account_id,
+            &query.key,
+            query.block_height_b,
         ),
-    ).await?;
+    )
+    .await?;
 
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format)?;
@@ -501,12 +635,18 @@ pub async fn diff_kv_handler(
         let mut a_json = a.as_ref().map(|e| e.to_json_with_fields(&fields));
         let mut b_json = b.as_ref().map(|e| e.to_json_with_fields(&fields));
         if decode {
-            if let Some(ref mut v) = a_json { decode_value_in_json(v); }
-            if let Some(ref mut v) = b_json { decode_value_in_json(v); }
+            if let Some(ref mut v) = a_json {
+                decode_value_in_json(v);
+            }
+            if let Some(ref mut v) = b_json {
+                decode_value_in_json(v);
+            }
         }
         Ok(HttpResponse::Ok().json(serde_json::json!({ "data": { "a": a_json, "b": b_json } })))
     } else {
-        Ok(HttpResponse::Ok().json(DataResponse { data: DiffResponse { a, b } }))
+        Ok(HttpResponse::Ok().json(DataResponse {
+            data: DiffResponse { a, b },
+        }))
     }
 }
 
@@ -550,11 +690,15 @@ pub async fn timeline_kv_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let (entries, has_more, truncated, dropped) = db.get_kv_timeline(&query)
-        .await?;
+    let (entries, has_more, truncated, dropped) = db.get_kv_timeline(&query).await?;
 
     let next_cursor = entries.last().map(|e| e.block_height.to_string());
-    let meta = PaginationMeta { has_more, truncated, next_cursor, dropped_rows: dropped_to_option(dropped) };
+    let meta = PaginationMeta {
+        has_more,
+        truncated,
+        next_cursor,
+        dropped_rows: dropped_to_option(dropped),
+    };
     let fields = parse_field_set(&query.fields);
     let decode = should_decode(&query.value_format)?;
     Ok(respond_paginated(entries, meta, &fields, decode))
@@ -584,9 +728,10 @@ pub async fn batch_kv_handler(
         ));
     }
     if body.keys.len() > MAX_BATCH_KEYS {
-        return Err(ApiError::InvalidParameter(
-            format!("keys cannot exceed {} items", MAX_BATCH_KEYS),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "keys cannot exceed {} items",
+            MAX_BATCH_KEYS
+        )));
     }
     for key in &body.keys {
         if key.is_empty() {
@@ -595,9 +740,10 @@ pub async fn batch_kv_handler(
             ));
         }
         if key.len() > MAX_BATCH_KEY_LENGTH {
-            return Err(ApiError::InvalidParameter(
-                format!("each key cannot exceed {} characters", MAX_BATCH_KEY_LENGTH),
-            ));
+            return Err(ApiError::InvalidParameter(format!(
+                "each key cannot exceed {} characters",
+                MAX_BATCH_KEY_LENGTH
+            )));
         }
     }
 
@@ -676,7 +822,12 @@ pub async fn edges_handler(
     validate_account_id(&query.target, "target")?;
     validate_limit(query.limit)?;
 
-    validate_cursor_or_offset(query.after_source.as_deref(), "after_source", query.offset, validate_account_id)?;
+    validate_cursor_or_offset(
+        query.after_source.as_deref(),
+        "after_source",
+        query.offset,
+        validate_account_id,
+    )?;
 
     tracing::info!(
         target: PROJECT_ID,
@@ -689,7 +840,8 @@ pub async fn edges_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let (sources, has_more, dropped) = db.query_edges(
+    let (sources, has_more, dropped) = db
+        .query_edges(
             &query.edge_type,
             &query.target,
             query.limit,
@@ -740,8 +892,7 @@ pub async fn edges_count_handler(
     );
 
     let db = require_db(&app_state).await?;
-    let count = db.count_edges(&query.edge_type, &query.target)
-        .await?;
+    let count = db.count_edges(&query.edge_type, &query.target).await?;
 
     Ok(HttpResponse::Ok().json(DataResponse {
         data: EdgesCountResponse {
@@ -762,9 +913,7 @@ pub async fn edges_count_handler(
     tag = "kv"
 )]
 #[get("/v1/status")]
-pub async fn status_handler(
-    app_state: web::Data<AppState>,
-) -> HttpResponse {
+pub async fn status_handler(app_state: web::Data<AppState>) -> HttpResponse {
     let guard = app_state.scylladb.read().await;
     let indexer_block = match guard.as_ref() {
         Some(db) => db.get_indexer_block_height().await.ok().flatten(),

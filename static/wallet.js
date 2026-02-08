@@ -70,6 +70,11 @@ function renderWalletUI() {
     container.innerHTML =
       `<span class="wallet-account">${esc(accountId)}</span>` +
       `<button type="button" class="wallet-btn disconnect" onclick="walletSignOut()">disconnect</button>`;
+    // Auto-fill account field only if still on the default value
+    const acctInput = document.getElementById('account-input');
+    if (acctInput && acctInput.value === 'root.near') {
+      acctInput.value = accountId;
+    }
     // Show the plant tab
     const plantBtn = document.getElementById('view-plant');
     if (plantBtn) plantBtn.hidden = false;
@@ -230,9 +235,11 @@ async function pollForIndexed(accountId, keyPath) {
 }
 
 function viewPlantedData(accountId, keyPath) {
+  const acctInput = document.getElementById('account-input');
+  if (acctInput) acctInput.value = accountId;
   currentAccount = accountId;
-  queryInput.value = `${accountId}/${keyPath}/**`;
+  if (queryInput) queryInput.value = `${keyPath}/**`;
   breadcrumb = [accountId, ...keyPath.split('/')];
   setViewMode('tree');
-  explore(`${accountId}/${keyPath}/**`);
+  explore(`${keyPath}/**`);
 }

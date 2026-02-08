@@ -3,8 +3,12 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::errors::NextRowError;
 use scylla::statement::prepared::PreparedStatement;
 
-use crate::models::{AccountsParams, ContractAccountRow, EdgeRow, EdgeSourceEntry, HistoryParams, KvEntry, KvHistoryRow, KvRow, QueryParams, WritersParams, TimelineParams, MAX_DEDUP_SCAN, MAX_HISTORY_SCAN, bigint_to_u64};
-use crate::queries::{build_prefix_query, build_prefix_cursor_query};
+use crate::models::{
+    bigint_to_u64, AccountsParams, ContractAccountRow, EdgeRow, EdgeSourceEntry, HistoryParams,
+    KvEntry, KvHistoryRow, KvRow, QueryParams, TimelineParams, WritersParams, MAX_DEDUP_SCAN,
+    MAX_HISTORY_SCAN,
+};
+use crate::queries::{build_prefix_cursor_query, build_prefix_query};
 use fastnear_primitives::types::ChainId;
 use futures::stream::StreamExt;
 use futures::Stream;
@@ -104,13 +108,22 @@ where
         false // caller computes after post-sort + slice
     };
 
-    PageResult { items, has_more, truncated, dropped_rows }
+    PageResult {
+        items,
+        has_more,
+        truncated,
+        dropped_rows,
+    }
 }
 
 /// Validate that a CQL identifier (keyspace/table name) contains only safe characters.
 pub(crate) fn validate_identifier(name: &str, label: &str) -> anyhow::Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        anyhow::bail!("{} must contain only alphanumeric characters and underscores: {}", label, name);
+        anyhow::bail!(
+            "{} must contain only alphanumeric characters and underscores: {}",
+            label,
+            name
+        );
     }
     Ok(())
 }
@@ -128,6 +141,8 @@ pub struct ScyllaDb {
     get_kv_timeline: PreparedStatement,
     accounts_by_contract: PreparedStatement,
     accounts_by_contract_key: PreparedStatement,
+    accounts_all: PreparedStatement,
+    accounts_all_cursor: PreparedStatement,
     edges_list: PreparedStatement,
     edges_list_cursor: PreparedStatement,
     edges_count: PreparedStatement,
@@ -138,6 +153,7 @@ pub struct ScyllaDb {
     pub history_table_name: String,
     pub reverse_view_name: String,
     pub kv_accounts_table_name: String,
+    pub all_accounts_table_name: String,
     pub kv_edges_table_name: String,
     pub kv_reverse_table_name: String,
 }
@@ -149,31 +165,37 @@ pub fn create_rustls_client_config() -> anyhow::Result<Arc<ClientConfig>> {
             .expect("Failed to install default provider");
     }
 
-    let ca_cert_path = env::var("SCYLLA_SSL_CA")
-        .map_err(|_| anyhow::anyhow!("SCYLLA_SSL_CA required for TLS"))?;
+    let ca_cert_path =
+        env::var("SCYLLA_SSL_CA").map_err(|_| anyhow::anyhow!("SCYLLA_SSL_CA required for TLS"))?;
     let ca_certs = rustls::pki_types::CertificateDer::from_pem_file(&ca_cert_path)
         .map_err(|e| anyhow::anyhow!("Failed to load CA cert from '{}': {}", ca_cert_path, e))?;
 
     let mut root_store = RootCertStore::empty();
-    root_store.add(ca_certs)
+    root_store
+        .add(ca_certs)
         .map_err(|e| anyhow::anyhow!("Failed to add CA certs to root store: {}", e))?;
 
-    let config = match (env::var("SCYLLA_SSL_CERT").ok(), env::var("SCYLLA_SSL_KEY").ok()) {
+    let config = match (
+        env::var("SCYLLA_SSL_CERT").ok(),
+        env::var("SCYLLA_SSL_KEY").ok(),
+    ) {
         (Some(cert_path), Some(key_path)) => {
             let client_certs = rustls::pki_types::CertificateDer::from_pem_file(&cert_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load client cert from '{}': {}", cert_path, e))?;
-            let client_key = rustls::pki_types::PrivateKeyDer::from_pem_file(&key_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load client key from '{}': {}", key_path, e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to load client cert from '{}': {}", cert_path, e)
+                })?;
+            let client_key =
+                rustls::pki_types::PrivateKeyDer::from_pem_file(&key_path).map_err(|e| {
+                    anyhow::anyhow!("Failed to load client key from '{}': {}", key_path, e)
+                })?;
             ClientConfig::builder()
                 .with_root_certificates(root_store)
                 .with_client_auth_cert(vec![client_certs], client_key)
                 .map_err(|e| anyhow::anyhow!("Failed to create client config with mTLS: {}", e))?
         }
-        _ => {
-            ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        }
+        _ => ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
     };
 
     Ok(Arc::new(config))
@@ -208,9 +230,7 @@ impl ScyllaDb {
     pub async fn test_connection(scylla_session: &Session) -> anyhow::Result<()> {
         let mut stmt = scylla::statement::Statement::new("SELECT now() FROM system.local");
         stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
-        scylla_session
-            .query_unpaged(stmt, &[])
-            .await?;
+        scylla_session.query_unpaged(stmt, &[]).await?;
         Ok(())
     }
 
@@ -218,41 +238,38 @@ impl ScyllaDb {
         // Simple query to verify connection
         let mut stmt = scylla::statement::Statement::new("SELECT now() FROM system.local");
         stmt.set_request_timeout(Some(std::time::Duration::from_secs(10)));
-        self.scylla_session
-            .query_unpaged(stmt, &[])
-            .await?;
+        self.scylla_session.query_unpaged(stmt, &[]).await?;
         Ok(())
     }
 
     pub async fn new(chain_id: ChainId, scylla_session: Session) -> anyhow::Result<Self> {
         // Support custom keyspace or use default pattern
-        let keyspace = env::var("KEYSPACE")
-            .unwrap_or_else(|_| format!("fastdata_{chain_id}"));
+        let keyspace = env::var("KEYSPACE").unwrap_or_else(|_| format!("fastdata_{chain_id}"));
 
         validate_identifier(&keyspace, "KEYSPACE")?;
 
-        scylla_session
-            .use_keyspace(&keyspace, false)
-            .await?;
+        scylla_session.use_keyspace(&keyspace, false).await?;
 
         // Support custom table names
-        let table_name = env::var("TABLE_NAME")
-            .unwrap_or_else(|_| "s_kv_last".to_string());
-        let history_table_name = env::var("HISTORY_TABLE_NAME")
-            .unwrap_or_else(|_| "s_kv".to_string());
-        let reverse_view_name = env::var("REVERSE_VIEW_NAME")
-            .unwrap_or_else(|_| "mv_kv_cur_key".to_string());
-        let kv_accounts_table_name = env::var("KV_ACCOUNTS_TABLE_NAME")
-            .unwrap_or_else(|_| "kv_accounts".to_string());
-        let kv_edges_table_name = env::var("KV_EDGES_TABLE_NAME")
-            .unwrap_or_else(|_| "kv_edges".to_string());
-        let kv_reverse_table_name = env::var("KV_REVERSE_TABLE_NAME")
-            .unwrap_or_else(|_| "kv_reverse".to_string());
+        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "s_kv_last".to_string());
+        let history_table_name =
+            env::var("HISTORY_TABLE_NAME").unwrap_or_else(|_| "s_kv".to_string());
+        let reverse_view_name =
+            env::var("REVERSE_VIEW_NAME").unwrap_or_else(|_| "mv_kv_cur_key".to_string());
+        let kv_accounts_table_name =
+            env::var("KV_ACCOUNTS_TABLE_NAME").unwrap_or_else(|_| "kv_accounts".to_string());
+        let all_accounts_table_name =
+            env::var("ALL_ACCOUNTS_TABLE_NAME").unwrap_or_else(|_| "all_accounts".to_string());
+        let kv_edges_table_name =
+            env::var("KV_EDGES_TABLE_NAME").unwrap_or_else(|_| "kv_edges".to_string());
+        let kv_reverse_table_name =
+            env::var("KV_REVERSE_TABLE_NAME").unwrap_or_else(|_| "kv_reverse".to_string());
 
         validate_identifier(&table_name, "TABLE_NAME")?;
         validate_identifier(&history_table_name, "HISTORY_TABLE_NAME")?;
         validate_identifier(&reverse_view_name, "REVERSE_VIEW_NAME")?;
         validate_identifier(&kv_accounts_table_name, "KV_ACCOUNTS_TABLE_NAME")?;
+        validate_identifier(&all_accounts_table_name, "ALL_ACCOUNTS_TABLE_NAME")?;
         validate_identifier(&kv_edges_table_name, "KV_EDGES_TABLE_NAME")?;
         validate_identifier(&kv_reverse_table_name, "KV_REVERSE_TABLE_NAME")?;
 
@@ -322,6 +339,16 @@ impl ScyllaDb {
                 &format!("SELECT predecessor_id FROM {} WHERE current_account_id = ? AND key = ?", kv_accounts_table_name),
                 scylla::frame::types::Consistency::LocalQuorum,
             ).await?,
+            accounts_all: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT predecessor_id FROM {}", all_accounts_table_name),
+                scylla::frame::types::Consistency::LocalQuorum,
+            ).await?,
+            accounts_all_cursor: Self::prepare_query(
+                &scylla_session,
+                &format!("SELECT predecessor_id FROM {} WHERE TOKEN(predecessor_id) > TOKEN(?)", all_accounts_table_name),
+                scylla::frame::types::Consistency::LocalQuorum,
+            ).await?,
             edges_list: Self::prepare_query(
                 &scylla_session,
                 &format!("SELECT source, block_height FROM {} WHERE edge_type = ? AND target = ?", kv_edges_table_name),
@@ -347,6 +374,7 @@ impl ScyllaDb {
             history_table_name,
             reverse_view_name,
             kv_accounts_table_name,
+            all_accounts_table_name,
             kv_edges_table_name,
             kv_reverse_table_name,
         })
@@ -371,10 +399,7 @@ impl ScyllaDb {
     ) -> anyhow::Result<Option<KvEntry>> {
         let result = self
             .scylla_session
-            .execute_unpaged(
-                &self.get_kv,
-                (predecessor_id, current_account_id, key),
-            )
+            .execute_unpaged(&self.get_kv, (predecessor_id, current_account_id, key))
             .await?
             .into_rows_result()?;
 
@@ -395,10 +420,7 @@ impl ScyllaDb {
     ) -> anyhow::Result<Option<String>> {
         let result = self
             .scylla_session
-            .execute_unpaged(
-                &self.get_kv_last,
-                (predecessor_id, current_account_id, key),
-            )
+            .execute_unpaged(&self.get_kv_last, (predecessor_id, current_account_id, key))
             .await?
             .into_rows_result()?;
 
@@ -421,31 +443,50 @@ impl ScyllaDb {
         params: &WritersParams,
     ) -> anyhow::Result<(Vec<KvEntry>, bool, bool, usize)> {
         let mut rows_stream = match &params.after_account {
-            Some(cursor) => {
-                self.scylla_session
-                    .execute_iter(self.reverse_list_cursor.clone(), (&params.current_account_id, &params.key, cursor))
-                    .await?
-                    .rows_stream::<KvRow>()?
-            }
-            None => {
-                self.scylla_session
-                    .execute_iter(self.reverse_list.clone(), (&params.current_account_id, &params.key))
-                    .await?
-                    .rows_stream::<KvRow>()?
-            }
+            Some(cursor) => self
+                .scylla_session
+                .execute_iter(
+                    self.reverse_list_cursor.clone(),
+                    (&params.current_account_id, &params.key, cursor),
+                )
+                .await?
+                .rows_stream::<KvRow>()?,
+            None => self
+                .scylla_session
+                .execute_iter(
+                    self.reverse_list.clone(),
+                    (&params.current_account_id, &params.key),
+                )
+                .await?
+                .rows_stream::<KvRow>()?,
         };
 
         let exclude_null = params.exclude_null.unwrap_or(false);
         let pred_filter = params.predecessor_id.clone();
-        let offset = if params.after_account.is_some() { 0 } else { params.offset };
-        let page = collect_page(&mut rows_stream, params.limit, offset, None, |row: KvRow| {
-            let entry = KvEntry::from(row);
-            if let Some(ref pred) = pred_filter {
-                if entry.predecessor_id != *pred { return None; }
-            }
-            if exclude_null && entry.value == "null" { return None; }
-            Some(entry)
-        }).await;
+        let offset = if params.after_account.is_some() {
+            0
+        } else {
+            params.offset
+        };
+        let page = collect_page(
+            &mut rows_stream,
+            params.limit,
+            offset,
+            None,
+            |row: KvRow| {
+                let entry = KvEntry::from(row);
+                if let Some(ref pred) = pred_filter {
+                    if entry.predecessor_id != *pred {
+                        return None;
+                    }
+                }
+                if exclude_null && entry.value == "null" {
+                    return None;
+                }
+                Some(entry)
+            },
+        )
+        .await;
 
         Ok((page.items, page.has_more, false, page.dropped_rows))
     }
@@ -456,31 +497,48 @@ impl ScyllaDb {
     ) -> anyhow::Result<(Vec<String>, bool, usize)> {
         // Use kv_reverse table for CQL-level cursor pagination
         let mut rows_stream = match &params.after_account {
-            Some(cursor) => {
-                self.scylla_session
-                    .execute_iter(self.reverse_list_cursor.clone(), (&params.current_account_id, &params.key, cursor))
-                    .await?
-                    .rows_stream::<KvRow>()?
-            }
-            None => {
-                self.scylla_session
-                    .execute_iter(self.reverse_list.clone(), (&params.current_account_id, &params.key))
-                    .await?
-                    .rows_stream::<KvRow>()?
-            }
+            Some(cursor) => self
+                .scylla_session
+                .execute_iter(
+                    self.reverse_list_cursor.clone(),
+                    (&params.current_account_id, &params.key, cursor),
+                )
+                .await?
+                .rows_stream::<KvRow>()?,
+            None => self
+                .scylla_session
+                .execute_iter(
+                    self.reverse_list.clone(),
+                    (&params.current_account_id, &params.key),
+                )
+                .await?
+                .rows_stream::<KvRow>()?,
         };
 
         let exclude_null = params.exclude_null.unwrap_or(false);
-        let offset = if params.after_account.is_some() { 0 } else { params.offset };
-        let page = collect_page(&mut rows_stream, params.limit, offset, None, |row: KvRow| {
-            if exclude_null && row.value == "null" { return None; }
-            Some(row.predecessor_id)
-        }).await;
+        let offset = if params.after_account.is_some() {
+            0
+        } else {
+            params.offset
+        };
+        let page = collect_page(
+            &mut rows_stream,
+            params.limit,
+            offset,
+            None,
+            |row: KvRow| {
+                if exclude_null && row.value == "null" {
+                    return None;
+                }
+                Some(row.predecessor_id)
+            },
+        )
+        .await;
 
         Ok((page.items, page.has_more, page.dropped_rows))
     }
 
-    /// Returns `(accounts, has_more, truncated)`.
+    /// Returns `(accounts, has_more, truncated, dropped_rows)`.
     /// `truncated` is true if scan hit MAX_DEDUP_SCAN.
     pub async fn query_accounts_by_contract(
         &self,
@@ -495,18 +553,12 @@ impl ScyllaDb {
         let mut rows_stream = match key {
             Some(k) => self
                 .scylla_session
-                .execute_iter(
-                    self.accounts_by_contract_key.clone(),
-                    (contract_id, k),
-                )
+                .execute_iter(self.accounts_by_contract_key.clone(), (contract_id, k))
                 .await?
                 .rows_stream::<ContractAccountRow>()?,
             None => self
                 .scylla_session
-                .execute_iter(
-                    self.accounts_by_contract.clone(),
-                    (contract_id,),
-                )
+                .execute_iter(self.accounts_by_contract.clone(), (contract_id,))
                 .await?
                 .rows_stream::<ContractAccountRow>()?,
         };
@@ -570,6 +622,64 @@ impl ScyllaDb {
         Ok((result, has_more, truncated, dropped_rows))
     }
 
+    /// Query the dedicated `all_accounts` table (one row per unique account).
+    /// Uses TOKEN-based cursor for stable pagination across partitions.
+    ///
+    /// **Known limitation:** if two distinct account IDs share a Murmur3 token
+    /// and the cursor equals that token, `TOKEN(pk) > TOKEN(cursor)` will skip
+    /// any other keys at the same token position. Astronomically unlikely in a
+    /// 64-bit token space.
+    ///
+    /// Returns `(accounts, has_more, dropped_rows)`.
+    pub async fn query_all_accounts(
+        &self,
+        limit: usize,
+        after_account: Option<&str>,
+    ) -> anyhow::Result<(Vec<String>, bool, usize)> {
+        let mut rows_stream = match after_account {
+            Some(cursor) => self
+                .scylla_session
+                .execute_iter(self.accounts_all_cursor.clone(), (cursor,))
+                .await?
+                .rows_stream::<ContractAccountRow>()?,
+            None => self
+                .scylla_session
+                .execute_iter(self.accounts_all.clone(), &[])
+                .await?
+                .rows_stream::<ContractAccountRow>()?,
+        };
+
+        // Defensive guard: drop the cursor value if it reappears in results.
+        // The true token-tie limitation (a *different* key sharing the same
+        // token being skipped) cannot be solved at this layer — see doc above.
+        let mut skipped_cursor = false;
+        let page = collect_page(
+            &mut rows_stream,
+            limit,
+            0,    // no offset — cursor handles resumption
+            None, // overfetch mode
+            |row: ContractAccountRow| {
+                if !skipped_cursor {
+                    if let Some(c) = after_account {
+                        if row.predecessor_id == c {
+                            skipped_cursor = true;
+                            tracing::debug!(
+                                target: "fastkv-server",
+                                cursor = c,
+                                "Dropped cursor row reappearance"
+                            );
+                            return None;
+                        }
+                    }
+                }
+                Some(row.predecessor_id)
+            },
+        )
+        .await;
+
+        Ok((page.items, page.has_more, page.dropped_rows))
+    }
+
     /// Returns (entries, has_more, dropped_rows).
     pub async fn query_kv_with_pagination(
         &self,
@@ -578,7 +688,8 @@ impl ScyllaDb {
         let mut rows_stream = match (&params.key_prefix, &params.after_key) {
             // Prefix + cursor: key > cursor AND key < prefix_end
             (Some(prefix), Some(cursor)) => {
-                let (stmt, cursor_start, prefix_end) = build_prefix_cursor_query(cursor, prefix, &self.table_name);
+                let (stmt, cursor_start, prefix_end) =
+                    build_prefix_cursor_query(cursor, prefix, &self.table_name);
                 self.scylla_session
                     .query_iter(
                         stmt,
@@ -609,34 +720,45 @@ impl ScyllaDb {
                     .rows_stream::<KvRow>()?
             }
             // No prefix + cursor: key > cursor
-            (None, Some(cursor)) => {
-                self.scylla_session
-                    .execute_iter(
-                        self.query_kv_cursor.clone(),
-                        (&params.predecessor_id, &params.current_account_id, cursor),
-                    )
-                    .await?
-                    .rows_stream::<KvRow>()?
-            }
+            (None, Some(cursor)) => self
+                .scylla_session
+                .execute_iter(
+                    self.query_kv_cursor.clone(),
+                    (&params.predecessor_id, &params.current_account_id, cursor),
+                )
+                .await?
+                .rows_stream::<KvRow>()?,
             // No prefix, no cursor: all keys
-            (None, None) => {
-                self.scylla_session
-                    .execute_iter(
-                        self.query_kv_no_prefix.clone(),
-                        (&params.predecessor_id, &params.current_account_id),
-                    )
-                    .await?
-                    .rows_stream::<KvRow>()?
-            }
+            (None, None) => self
+                .scylla_session
+                .execute_iter(
+                    self.query_kv_no_prefix.clone(),
+                    (&params.predecessor_id, &params.current_account_id),
+                )
+                .await?
+                .rows_stream::<KvRow>()?,
         };
 
         let exclude_null = params.exclude_null.unwrap_or(false);
-        let offset = if params.after_key.is_some() { 0 } else { params.offset };
-        let page = collect_page(&mut rows_stream, params.limit, offset, None, |row: KvRow| {
-            let entry = KvEntry::from(row);
-            if exclude_null && entry.value == "null" { return None; }
-            Some(entry)
-        }).await;
+        let offset = if params.after_key.is_some() {
+            0
+        } else {
+            params.offset
+        };
+        let page = collect_page(
+            &mut rows_stream,
+            params.limit,
+            offset,
+            None,
+            |row: KvRow| {
+                let entry = KvEntry::from(row);
+                if exclude_null && entry.value == "null" {
+                    return None;
+                }
+                Some(entry)
+            },
+        )
+        .await;
 
         Ok((page.items, page.has_more, page.dropped_rows))
     }
@@ -694,12 +816,27 @@ impl ScyllaDb {
         let from_block = params.from_block.map(|b| b.max(0) as u64);
         let to_block = params.to_block.map(|b| b.max(0) as u64);
 
-        let mut page = collect_page(&mut rows_stream, params.limit, 0, Some(MAX_HISTORY_SCAN), |row: KvHistoryRow| {
-            let entry = KvEntry::from(row);
-            if let Some(fb) = from_block { if entry.block_height < fb { return None; } }
-            if let Some(tb) = to_block { if entry.block_height > tb { return None; } }
-            Some(entry)
-        }).await;
+        let mut page = collect_page(
+            &mut rows_stream,
+            params.limit,
+            0,
+            Some(MAX_HISTORY_SCAN),
+            |row: KvHistoryRow| {
+                let entry = KvEntry::from(row);
+                if let Some(fb) = from_block {
+                    if entry.block_height < fb {
+                        return None;
+                    }
+                }
+                if let Some(tb) = to_block {
+                    if entry.block_height > tb {
+                        return None;
+                    }
+                }
+                Some(entry)
+            },
+        )
+        .await;
 
         // Post-sort (scan-cap mode collects all, caller sorts + slices)
         let is_asc = params.order.eq_ignore_ascii_case("asc");
@@ -729,36 +866,37 @@ impl ScyllaDb {
         after_source: Option<&str>,
     ) -> anyhow::Result<(Vec<EdgeSourceEntry>, bool, usize)> {
         let mut rows_stream = match after_source {
-            Some(cursor) => {
-                self.scylla_session
-                    .execute_iter(self.edges_list_cursor.clone(), (edge_type, target, cursor))
-                    .await?
-                    .rows_stream::<EdgeRow>()?
-            }
-            None => {
-                self.scylla_session
-                    .execute_iter(self.edges_list.clone(), (edge_type, target))
-                    .await?
-                    .rows_stream::<EdgeRow>()?
-            }
+            Some(cursor) => self
+                .scylla_session
+                .execute_iter(self.edges_list_cursor.clone(), (edge_type, target, cursor))
+                .await?
+                .rows_stream::<EdgeRow>()?,
+            None => self
+                .scylla_session
+                .execute_iter(self.edges_list.clone(), (edge_type, target))
+                .await?
+                .rows_stream::<EdgeRow>()?,
         };
 
         let effective_offset = if after_source.is_some() { 0 } else { offset };
-        let page = collect_page(&mut rows_stream, limit, effective_offset, None, |row: EdgeRow| {
-            Some(EdgeSourceEntry {
-                source: row.source,
-                block_height: bigint_to_u64(row.block_height),
-            })
-        }).await;
+        let page = collect_page(
+            &mut rows_stream,
+            limit,
+            effective_offset,
+            None,
+            |row: EdgeRow| {
+                Some(EdgeSourceEntry {
+                    source: row.source,
+                    block_height: bigint_to_u64(row.block_height),
+                })
+            },
+        )
+        .await;
 
         Ok((page.items, page.has_more, page.dropped_rows))
     }
 
-    pub async fn count_edges(
-        &self,
-        edge_type: &str,
-        target: &str,
-    ) -> anyhow::Result<usize> {
+    pub async fn count_edges(&self, edge_type: &str, target: &str) -> anyhow::Result<usize> {
         let result = self
             .scylla_session
             .execute_unpaged(&self.edges_count, (edge_type, target))
@@ -787,14 +925,25 @@ impl ScyllaDb {
             .scylla_session
             .execute_iter(
                 self.get_kv_history.clone(),
-                (&params.predecessor_id, &params.current_account_id, &params.key, from_block, to_block),
+                (
+                    &params.predecessor_id,
+                    &params.current_account_id,
+                    &params.key,
+                    from_block,
+                    to_block,
+                ),
             )
             .await?
             .rows_stream::<KvHistoryRow>()?;
 
-        let mut page = collect_page(&mut rows_stream, params.limit, 0, Some(MAX_HISTORY_SCAN), |row: KvHistoryRow| {
-            Some(KvEntry::from(row))
-        }).await;
+        let mut page = collect_page(
+            &mut rows_stream,
+            params.limit,
+            0,
+            Some(MAX_HISTORY_SCAN),
+            |row: KvHistoryRow| Some(KvEntry::from(row)),
+        )
+        .await;
 
         // Post-sort (scan-cap mode collects all, caller sorts + slices)
         let is_asc = params.order.eq_ignore_ascii_case("asc");
@@ -853,7 +1002,7 @@ mod tests {
 
     fn make_err() -> NextRowError {
         NextRowError::from(scylla::deserialize::DeserializationError::new(
-            std::io::Error::new(std::io::ErrorKind::Other, "test deser error"),
+            std::io::Error::other("test deser error"),
         ))
     }
 
@@ -888,9 +1037,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_page_dropped_rows() {
-        let items: Vec<Result<i32, NextRowError>> = vec![
-            Ok(1), Err(make_err()), Ok(2), Err(make_err()), Ok(3),
-        ];
+        let items: Vec<Result<i32, NextRowError>> =
+            vec![Ok(1), Err(make_err()), Ok(2), Err(make_err()), Ok(3)];
         let mut s = futures::stream::iter(items);
         let page = collect_page(&mut s, 10, 0, None, Some).await;
         assert_eq!(page.items, vec![1, 2, 3]);
@@ -913,9 +1061,20 @@ mod tests {
         // Only keep odd numbers; offset should count filtered items
         let items: Vec<Result<i32, NextRowError>> = (1..=10).map(Ok).collect();
         let mut s = futures::stream::iter(items);
-        let page = collect_page(&mut s, 3, 1, None, |n| {
-            if n % 2 == 1 { Some(n) } else { None }
-        }).await;
+        let page = collect_page(
+            &mut s,
+            3,
+            1,
+            None,
+            |n| {
+                if n % 2 == 1 {
+                    Some(n)
+                } else {
+                    None
+                }
+            },
+        )
+        .await;
         // Odd items: 1, 3, 5, 7, 9. Skip 1 (offset), take 3+1: [3,5,7,9]
         assert_eq!(page.items, vec![3, 5, 7]);
         assert!(page.has_more);

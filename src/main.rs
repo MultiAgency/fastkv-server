@@ -5,15 +5,18 @@ mod scylladb;
 mod social_handlers;
 mod tree;
 
-use crate::handlers::{accounts_handler, batch_kv_handler, diff_kv_handler, edges_handler, edges_count_handler, get_kv_handler, health_check, history_kv_handler, query_kv_handler, status_handler, timeline_kv_handler, writers_handler};
-use actix_files::Files;
-use crate::social_handlers::{
-    social_get_handler, social_keys_handler, social_index_handler,
-    social_profile_handler, social_followers_handler, social_following_handler,
-    social_account_feed_handler,
+use crate::handlers::{
+    accounts_handler, batch_kv_handler, diff_kv_handler, edges_count_handler, edges_handler,
+    get_kv_handler, health_check, history_kv_handler, query_kv_handler, status_handler,
+    timeline_kv_handler, writers_handler,
 };
 use crate::scylladb::ScyllaDb;
+use crate::social_handlers::{
+    social_account_feed_handler, social_followers_handler, social_following_handler,
+    social_get_handler, social_index_handler, social_keys_handler, social_profile_handler,
+};
 use actix_cors::Cors;
+use actix_files::Files;
 use actix_web::http::header;
 use actix_web::{dev::Service, middleware, web, App, HttpServer};
 use dotenvy::dotenv;
@@ -101,6 +104,8 @@ struct ApiDoc;
 pub struct AppState {
     pub scylladb: Arc<RwLock<Option<ScyllaDb>>>,
     pub chain_id: ChainId,
+    /// Per-IP throttle for scan=1 requests on /v1/kv/accounts.
+    pub scan_throttle: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 #[actix_web::main]
@@ -205,6 +210,11 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
+    let scan_throttle = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        std::time::Instant,
+    >::new()));
+
     HttpServer::new(move || {
         let block_cache = Arc::clone(&indexer_block_cache);
 
@@ -217,13 +227,18 @@ async fn main() -> std::io::Result<()> {
                 header::AUTHORIZATION,
                 header::ACCEPT,
             ])
-            .expose_headers(vec!["X-Results-Truncated", "X-Indexer-Block", "X-Dropped-Rows"])
+            .expose_headers(vec![
+                "X-Results-Truncated",
+                "X-Indexer-Block",
+                "X-Dropped-Rows",
+            ])
             .max_age(3600);
 
         App::new()
             .app_data(web::Data::new(AppState {
                 scylladb: Arc::clone(&scylladb),
                 chain_id,
+                scan_throttle: scan_throttle.clone(),
             }))
             .wrap(cors)
             .wrap_fn({
@@ -268,10 +283,7 @@ async fn main() -> std::io::Result<()> {
             .service(social_followers_handler)
             .service(social_following_handler)
             .service(social_account_feed_handler)
-            .service(
-                Files::new("/", "./static")
-                    .index_file("index.html")
-            )
+            .service(Files::new("/", "./static").index_file("index.html"))
     })
     .bind(format!(
         "0.0.0.0:{}",

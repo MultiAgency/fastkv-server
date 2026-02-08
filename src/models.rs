@@ -16,6 +16,7 @@ pub const MAX_STREAM_ERRORS: usize = 10;
 pub const MAX_HISTORY_SCAN: usize = 10_000;
 pub const MAX_DEDUP_SCAN: usize = 100_000;
 pub const MAX_EDGE_TYPE_LENGTH: usize = 256;
+pub const MAX_SCAN_LIMIT: usize = 1000;
 pub const PROJECT_ID: &str = "fastkv-server";
 
 // Raw row from ScyllaDB s_kv_last (matches table schema exactly)
@@ -76,15 +77,24 @@ pub struct KvEntry {
 impl KvEntry {
     /// Convert to JSON with only requested fields. Pass a pre-built HashSet to avoid
     /// rebuilding it per entry when called in a loop.
-    pub fn to_json_with_fields(&self, fields: &Option<std::collections::HashSet<String>>) -> serde_json::Value {
+    pub fn to_json_with_fields(
+        &self,
+        fields: &Option<std::collections::HashSet<String>>,
+    ) -> serde_json::Value {
         if let Some(field_set) = fields {
             let mut map = serde_json::Map::new();
 
             if field_set.contains("accountId") {
-                map.insert("accountId".to_string(), serde_json::json!(&self.predecessor_id));
+                map.insert(
+                    "accountId".to_string(),
+                    serde_json::json!(&self.predecessor_id),
+                );
             }
             if field_set.contains("contractId") {
-                map.insert("contractId".to_string(), serde_json::json!(&self.current_account_id));
+                map.insert(
+                    "contractId".to_string(),
+                    serde_json::json!(&self.current_account_id),
+                );
             }
             if field_set.contains("key") {
                 map.insert("key".to_string(), serde_json::json!(&self.key));
@@ -93,13 +103,22 @@ impl KvEntry {
                 map.insert("value".to_string(), serde_json::json!(&self.value));
             }
             if field_set.contains("block_height") {
-                map.insert("block_height".to_string(), serde_json::json!(self.block_height));
+                map.insert(
+                    "block_height".to_string(),
+                    serde_json::json!(self.block_height),
+                );
             }
             if field_set.contains("block_timestamp") {
-                map.insert("block_timestamp".to_string(), serde_json::json!(self.block_timestamp));
+                map.insert(
+                    "block_timestamp".to_string(),
+                    serde_json::json!(self.block_timestamp),
+                );
             }
             if field_set.contains("receipt_id") {
-                map.insert("receipt_id".to_string(), serde_json::json!(&self.receipt_id));
+                map.insert(
+                    "receipt_id".to_string(),
+                    serde_json::json!(&self.receipt_id),
+                );
             }
             if field_set.contains("tx_hash") {
                 map.insert("tx_hash".to_string(), serde_json::json!(&self.tx_hash));
@@ -226,7 +245,11 @@ pub fn parse_field_set(fields: &Option<String>) -> Option<std::collections::Hash
 
 /// Convert a dropped-row count to `Option<u32>`, returning `None` for zero.
 pub(crate) fn dropped_to_option(n: usize) -> Option<u32> {
-    if n > 0 { Some(n.min(u32::MAX as usize) as u32) } else { None }
+    if n > 0 {
+        Some(n.min(u32::MAX as usize) as u32)
+    } else {
+        None
+    }
 }
 
 /// Resolve whether to decode values based on `value_format`.
@@ -234,15 +257,18 @@ pub fn should_decode(value_format: &Option<String>) -> Result<bool, ApiError> {
     match value_format.as_deref() {
         Some("json") => Ok(true),
         Some("raw") | None => Ok(false),
-        Some(other) => Err(ApiError::InvalidParameter(
-            format!("value_format must be 'json' or 'raw', got '{}'", other),
-        )),
+        Some(other) => Err(ApiError::InvalidParameter(format!(
+            "value_format must be 'json' or 'raw', got '{}'",
+            other
+        ))),
     }
 }
 
 pub fn validate_limit(limit: usize) -> Result<(), ApiError> {
     if limit == 0 || limit > 1000 {
-        return Err(ApiError::InvalidParameter("limit must be between 1 and 1000".to_string()));
+        return Err(ApiError::InvalidParameter(
+            "limit must be between 1 and 1000".to_string(),
+        ));
     }
     Ok(())
 }
@@ -275,7 +301,6 @@ pub struct QueryParams {
     pub after_key: Option<String>,
 }
 
-
 // GET /v1/kv/writers — replaces /v1/kv/reverse and /v1/kv/by-key
 #[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct WritersParams {
@@ -303,7 +328,6 @@ pub struct WritersParams {
     pub after_account: Option<String>,
 }
 
-
 fn default_limit() -> usize {
     100
 }
@@ -330,7 +354,6 @@ pub struct HistoryParams {
     #[serde(default)]
     pub value_format: Option<String>,
 }
-
 
 fn default_history_limit() -> usize {
     100
@@ -360,9 +383,12 @@ pub struct AccountsParams {
 // Accounts-by-contract query parameters
 #[derive(Deserialize, Clone, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct AccountsQueryParams {
-    /// Contract account to query (required).
-    #[serde(rename = "contractId")]
-    pub contract_id: String,
+    /// Contract account. When omitted, requires scan=1 for a full table scan.
+    #[serde(rename = "contractId", default)]
+    pub contract_id: Option<String>,
+    /// Opt-in for expensive full table scan (required when contractId is omitted).
+    #[serde(default)]
+    pub scan: Option<u8>,
     /// Optional key filter. Recommended for large contracts to avoid expensive full-partition scans.
     #[serde(default)]
     pub key: Option<String>,
@@ -370,8 +396,11 @@ pub struct AccountsQueryParams {
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
-    /// Cursor: return accounts alphabetically after this value (exclusive).
+    /// Cursor: return accounts after this value (exclusive).
+    /// Token-ordered (Murmur3) in scan mode; lexicographic with contractId.
     /// Cannot be combined with offset > 0.
+    /// Note: responses always emit next_cursor (even when has_more is false);
+    /// use it for resumption, especially when truncated=true.
     #[serde(default)]
     pub after_account: Option<String>,
 }
@@ -584,6 +613,7 @@ pub enum ApiError {
     InvalidParameter(String),
     DatabaseError(String),
     DatabaseUnavailable,
+    TooManyRequests(String),
 }
 
 impl fmt::Display for ApiError {
@@ -592,6 +622,7 @@ impl fmt::Display for ApiError {
             ApiError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
             ApiError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ApiError::DatabaseUnavailable => write!(f, "Database unavailable"),
+            ApiError::TooManyRequests(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -602,6 +633,7 @@ impl ResponseError for ApiError {
             ApiError::InvalidParameter(_) => StatusCode::BAD_REQUEST,
             ApiError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::DatabaseUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
         };
 
         HttpResponse::build(status).json(serde_json::json!({

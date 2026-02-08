@@ -32,7 +32,7 @@
 | `/v1/kv/query` | GET | `query_kv_handler` | `s_kv_last` | Moderate | `WHERE ... AND key >= ? AND key < ?` (prefix). **Risky** without `key_prefix` (full partition) |
 | `/v1/kv/history` | GET | `history_kv_handler` | `s_kv` | Cheap | `WHERE ... AND key=? AND block_height >= ? AND block_height <= ?` (CQL pushdown) |
 | `/v1/kv/writers` | GET | `writers_handler` | `mv_kv_cur_key` | Moderate | `WHERE current_account_id=? AND key=? ORDER BY ... DESC` + in-memory dedup (100k cap) |
-| `/v1/kv/accounts` | GET | `accounts_handler` | `kv_accounts` | Cheap/Risky | Cheap with `key` param (PK+CK). **Risky** without `key` (full partition + 100k dedup) |
+| `/v1/kv/accounts` | GET | `accounts_handler` | `kv_accounts` / `all_accounts` | Cheap/Risky | Cheap with `key` param (PK+CK). **Risky** without `key` (full partition + 100k dedup). Without `contractId` (`scan=1`): reads `all_accounts` table with TOKEN cursor, throttled 1 req/sec/IP |
 | `/v1/kv/diff` | GET | `diff_kv_handler` | `s_kv` | Moderate | 2 parallel PK+CK lookups at exact block heights |
 | `/v1/kv/timeline` | GET | `timeline_kv_handler` | `s_kv` | Risky | `WHERE predecessor_id=? AND current_account_id=?` — full partition, in-memory block filter + sort, 10k row cap |
 | `/v1/kv/edges` | GET | `edges_handler` | `kv_edges` | Moderate/Risky | Moderate with `after_source` cursor (`source > ?`). Risky without cursor (full partition + offset) |
@@ -189,13 +189,18 @@ Returns `PaginatedResponse<KvEntry>`. `meta.truncated: true` if scan hit 10,000 
 
 | Param | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `contractId` | string | yes | | Contract account, max 256 chars |
-| `key` | string | no | | Key filter. **Recommended for large contracts** — omitting triggers full partition scan + dedup. |
-| `limit` | int | no | 100 | Range 1–1000 |
-| `offset` | int | no | 0 | Max 100,000 |
+| `contractId` | string | no | | Contract account, max 256 chars. When omitted, requires `scan=1`. |
+| `scan` | int | no | | Set to `1` to opt-in to full table scan when `contractId` is omitted. |
+| `key` | string | no | | Key filter. **Recommended for large contracts** — omitting triggers full partition scan + dedup. Requires `contractId`. |
+| `limit` | int | no | 100 | Range 1–1000. Clamped to 1,000 max when `contractId` is omitted. |
+| `offset` | int | no | 0 | Max 100,000. Not available when `contractId` is omitted. |
 | `after_account` | string | no | | Cursor: return accounts after this value (exclusive). Cannot combine with `offset > 0`. |
 
 Returns `PaginatedResponse<String>` (list of account IDs). `meta.truncated: true` if dedup scan hit 100,000.
+
+> **Scan mode** (`contractId` omitted, `scan=1`): queries the dedicated `all_accounts` table (one row per unique account). Pagination is **token-ordered** (Murmur3 hash order), not alphabetical — results appear in a stable but non-lexicographic order. Pass the last returned account ID as `after_account` to resume. Throttled to 1 req/sec per IP (429 if exceeded). Intended for admin/dev use.
+>
+> **Required table:** `all_accounts` (`predecessor_id text PRIMARY KEY`). Override name via `ALL_ACCOUNTS_TABLE_NAME` env var.
 
 ### GET /v1/kv/edges
 
@@ -489,10 +494,11 @@ interface WritersParams {
 }
 
 interface AccountsQueryParams {
-  contractId: string;
-  key?: string;
-  limit?: number;
-  offset?: number;
+  contractId?: string;   // optional; requires scan=1 when omitted
+  scan?: number;         // 1 to opt-in to full table scan when contractId omitted
+  key?: string;          // requires contractId
+  limit?: number;        // clamped to 1,000 when contractId omitted
+  offset?: number;       // not available when contractId omitted
   after_account?: string; // cursor, cannot combine with offset > 0
 }
 
@@ -611,6 +617,7 @@ interface SocialAccountFeedParams {
 | `HISTORY_TABLE_NAME` | `s_kv` | History table (with block_height clustering) |
 | `REVERSE_VIEW_NAME` | `mv_kv_cur_key` | Materialized view for reverse lookups |
 | `KV_ACCOUNTS_TABLE_NAME` | `kv_accounts` | Contract-to-writer mappings |
+| `ALL_ACCOUNTS_TABLE_NAME` | `all_accounts` | Unique accounts table (`predecessor_id text PRIMARY KEY`). Used by `scan=1`. |
 | `KV_EDGES_TABLE_NAME` | `kv_edges` | Reverse edge lookup table |
 | `PORT` | `3001` | Server listen port |
 | `DB_RECONNECT_INTERVAL_SECS` | `5` | Background reconnection interval (5–300s, exponential backoff) |
@@ -638,6 +645,9 @@ mv_kv_cur_key   Materialized view on s_kv_last
 
 kv_accounts     PRIMARY KEY ((current_account_id), key, predecessor_id)
                 Contract-to-writer mapping. Populated asynchronously (reads use LocalQuorum).
+
+all_accounts    PRIMARY KEY (predecessor_id)
+                One row per unique account. Used by scan=1 on /v1/kv/accounts. Populated by indexer.
 
 kv_edges        PRIMARY KEY ((edge_type, target), source)
                 → block_height

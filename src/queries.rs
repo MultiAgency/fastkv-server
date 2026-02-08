@@ -20,7 +20,11 @@ pub(crate) fn build_prefix_query(prefix: &str, table_name: &str) -> (Statement, 
 
 /// Build a prefix query with a cursor: key > cursor AND key < prefix_end.
 /// Used when `after_key` cursor is provided alongside a key_prefix.
-pub(crate) fn build_prefix_cursor_query(cursor: &str, prefix: &str, table_name: &str) -> (Statement, String, String) {
+pub(crate) fn build_prefix_cursor_query(
+    cursor: &str,
+    prefix: &str,
+    table_name: &str,
+) -> (Statement, String, String) {
     let columns = "predecessor_id, current_account_id, key, value, block_height, block_timestamp, receipt_id, tx_hash";
     let query_text = format!(
         "SELECT {} FROM {} WHERE predecessor_id = ? AND current_account_id = ? AND key > ? AND key < ?",
@@ -63,7 +67,8 @@ mod tests {
 
     #[test]
     fn test_build_prefix_cursor_query() {
-        let (_stmt, cursor, end) = build_prefix_cursor_query("graph/follow/alice.near", "graph/follow/", "s_kv_last");
+        let (_stmt, cursor, end) =
+            build_prefix_cursor_query("graph/follow/alice.near", "graph/follow/", "s_kv_last");
         assert_eq!(cursor, "graph/follow/alice.near");
         assert_eq!(end, "graph/follow/\u{ff}");
     }

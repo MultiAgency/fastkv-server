@@ -8,7 +8,6 @@ use crate::AppState;
 
 use std::sync::LazyLock;
 
-
 static SOCIAL_CONTRACT: LazyLock<String> = LazyLock::new(|| {
     std::env::var("SOCIAL_CONTRACT").unwrap_or_else(|_| "social.near".to_string())
 });
@@ -27,10 +26,7 @@ fn resolve_contract(contract_id: &Option<String>) -> Result<&str, ApiError> {
 
 enum KeyPattern {
     /// Exact key lookup for a specific account: "alice.near/post/main"
-    Exact {
-        account_id: String,
-        key: String,
-    },
+    Exact { account_id: String, key: String },
     /// Recursive wildcard: "alice.near/profile/**" -> prefix query
     RecursiveWildcard {
         account_id: String,
@@ -42,14 +38,14 @@ enum KeyPattern {
         key_prefix: String,
     },
     /// Wildcard account with exact key: "*/widget/name"
-    WildcardAccount {
-        key: String,
-    },
+    WildcardAccount { key: String },
 }
 
 fn parse_social_key(pattern: &str) -> Result<KeyPattern, ApiError> {
     if pattern.is_empty() {
-        return Err(ApiError::InvalidParameter("key pattern cannot be empty".to_string()));
+        return Err(ApiError::InvalidParameter(
+            "key pattern cannot be empty".to_string(),
+        ));
     }
 
     let (account_part, key_part) = match pattern.find('/') {
@@ -57,7 +53,9 @@ fn parse_social_key(pattern: &str) -> Result<KeyPattern, ApiError> {
         None => {
             // Just an account ID with no key path — treat as recursive wildcard on all keys
             if pattern.len() > MAX_ACCOUNT_ID_LENGTH {
-                return Err(ApiError::InvalidParameter("account ID too long".to_string()));
+                return Err(ApiError::InvalidParameter(
+                    "account ID too long".to_string(),
+                ));
             }
             return Ok(KeyPattern::RecursiveWildcard {
                 account_id: pattern.to_string(),
@@ -85,9 +83,10 @@ fn parse_social_key(pattern: &str) -> Result<KeyPattern, ApiError> {
     }
 
     if key_part.len() > MAX_KEY_LENGTH {
-        return Err(ApiError::InvalidParameter(
-            format!("key pattern cannot exceed {} characters", MAX_KEY_LENGTH),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "key pattern cannot exceed {} characters",
+            MAX_KEY_LENGTH
+        )));
     }
 
     if key_part == "**" {
@@ -135,16 +134,22 @@ struct IndexQuery<'a> {
 
 /// Returns (entries, dropped_rows).
 async fn query_index(q: IndexQuery<'_>) -> Result<(Vec<IndexEntry>, usize), ApiError> {
-    let IndexQuery { app_state, contract_id, action, key, order, limit, from, account_id } = q;
+    let IndexQuery {
+        app_state,
+        contract_id,
+        action,
+        key,
+        order,
+        limit,
+        from,
+        account_id,
+    } = q;
     let index_key = format!("index/{}/{}", action, key);
 
     let scylladb = require_db(app_state).await?;
     let mut rows_stream = scylladb
         .scylla_session
-        .execute_iter(
-            scylladb.reverse_kv.clone(),
-            (contract_id, &index_key),
-        )
+        .execute_iter(scylladb.reverse_kv.clone(), (contract_id, &index_key))
         .await
         .map_err(anyhow::Error::from)?
         .rows_stream::<KvRow>()
@@ -246,19 +251,26 @@ pub async fn social_get_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     if body.keys.is_empty() {
-        return Err(ApiError::InvalidParameter("keys cannot be empty".to_string()));
+        return Err(ApiError::InvalidParameter(
+            "keys cannot be empty".to_string(),
+        ));
     }
     if body.keys.len() > MAX_SOCIAL_KEYS {
-        return Err(ApiError::InvalidParameter(
-            format!("keys cannot exceed {} patterns", MAX_SOCIAL_KEYS),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "keys cannot exceed {} patterns",
+            MAX_SOCIAL_KEYS
+        )));
     }
 
     let contract = resolve_contract(&body.contract_id)?;
-    let with_block_height = body.options.as_ref()
+    let with_block_height = body
+        .options
+        .as_ref()
         .and_then(|o| o.with_block_height)
         .unwrap_or(false);
-    let return_deleted = body.options.as_ref()
+    let return_deleted = body
+        .options
+        .as_ref()
         .and_then(|o| o.return_deleted)
         .unwrap_or(false);
 
@@ -273,9 +285,7 @@ pub async fn social_get_handler(
 
         match parsed {
             KeyPattern::Exact { account_id, key } => {
-                let entry = scylladb
-                    .get_kv(&account_id, contract, &key)
-                    .await?;
+                let entry = scylladb.get_kv(&account_id, contract, &key).await?;
 
                 if let Some(entry) = entry {
                     let items = vec![(entry.key.clone(), entry.value.clone())];
@@ -300,12 +310,23 @@ pub async fn social_get_handler(
                     }
                 }
             }
-            KeyPattern::RecursiveWildcard { account_id, key_prefix } => {
+            KeyPattern::RecursiveWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 let query = QueryParams {
                     predecessor_id: account_id.clone(),
                     current_account_id: contract.to_string(),
-                    key_prefix: if key_prefix.is_empty() { None } else { Some(key_prefix) },
-                    exclude_null: if return_deleted { Some(false) } else { Some(true) },
+                    key_prefix: if key_prefix.is_empty() {
+                        None
+                    } else {
+                        Some(key_prefix)
+                    },
+                    exclude_null: if return_deleted {
+                        Some(false)
+                    } else {
+                        Some(true)
+                    },
                     limit: MAX_SOCIAL_RESULTS,
                     offset: 0,
                     fields: None,
@@ -314,7 +335,8 @@ pub async fn social_get_handler(
                     after_key: None,
                 };
 
-                let (entries, _has_more, dropped) = scylladb.query_kv_with_pagination(&query).await?;
+                let (entries, _has_more, dropped) =
+                    scylladb.query_kv_with_pagination(&query).await?;
                 if dropped > 0 {
                     tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social get (recursive wildcard)");
                 }
@@ -322,7 +344,8 @@ pub async fn social_get_handler(
                     truncated = true;
                 }
 
-                let items: Vec<(String, String)> = entries.iter()
+                let items: Vec<(String, String)> = entries
+                    .iter()
                     .map(|e| (e.key.clone(), e.value.clone()))
                     .collect();
                 let subtree = build_tree(&items);
@@ -339,12 +362,23 @@ pub async fn social_get_handler(
                     }
                 }
             }
-            KeyPattern::SingleWildcard { account_id, key_prefix } => {
+            KeyPattern::SingleWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 let query = QueryParams {
                     predecessor_id: account_id.clone(),
                     current_account_id: contract.to_string(),
-                    key_prefix: if key_prefix.is_empty() { None } else { Some(key_prefix.clone()) },
-                    exclude_null: if return_deleted { Some(false) } else { Some(true) },
+                    key_prefix: if key_prefix.is_empty() {
+                        None
+                    } else {
+                        Some(key_prefix.clone())
+                    },
+                    exclude_null: if return_deleted {
+                        Some(false)
+                    } else {
+                        Some(true)
+                    },
                     limit: MAX_SOCIAL_RESULTS,
                     offset: 0,
                     fields: None,
@@ -353,7 +387,8 @@ pub async fn social_get_handler(
                     after_key: None,
                 };
 
-                let (entries, _has_more, dropped) = scylladb.query_kv_with_pagination(&query).await?;
+                let (entries, _has_more, dropped) =
+                    scylladb.query_kv_with_pagination(&query).await?;
                 if dropped > 0 {
                     tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social get (single wildcard)");
                 }
@@ -363,7 +398,8 @@ pub async fn social_get_handler(
 
                 // Filter to single level only: key should be prefix + "something" with no more slashes
                 let prefix_depth = key_prefix.matches('/').count();
-                let items: Vec<(String, String)> = entries.iter()
+                let items: Vec<(String, String)> = entries
+                    .iter()
                     .filter(|e| {
                         let key_depth = e.key.matches('/').count();
                         key_depth == prefix_depth
@@ -392,7 +428,8 @@ pub async fn social_get_handler(
                     value_format: None,
                     after_account: None,
                 };
-                let (entries, _has_more, _truncated, dropped) = scylladb.query_writers(&by_key_params).await?;
+                let (entries, _has_more, _truncated, dropped) =
+                    scylladb.query_writers(&by_key_params).await?;
                 if dropped > 0 {
                     tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social get (wildcard account)");
                 }
@@ -438,23 +475,32 @@ pub async fn social_keys_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     if body.keys.is_empty() {
-        return Err(ApiError::InvalidParameter("keys cannot be empty".to_string()));
+        return Err(ApiError::InvalidParameter(
+            "keys cannot be empty".to_string(),
+        ));
     }
     if body.keys.len() > MAX_SOCIAL_KEYS {
-        return Err(ApiError::InvalidParameter(
-            format!("keys cannot exceed {} patterns", MAX_SOCIAL_KEYS),
-        ));
+        return Err(ApiError::InvalidParameter(format!(
+            "keys cannot exceed {} patterns",
+            MAX_SOCIAL_KEYS
+        )));
     }
 
     let contract = resolve_contract(&body.contract_id)?;
-    let return_block_height = body.options.as_ref()
+    let return_block_height = body
+        .options
+        .as_ref()
         .and_then(|o| o.return_type.as_deref())
         .map(|t| t == "BlockHeight")
         .unwrap_or(false);
-    let return_deleted = body.options.as_ref()
+    let return_deleted = body
+        .options
+        .as_ref()
         .and_then(|o| o.return_deleted)
         .unwrap_or(false);
-    let values_only = body.options.as_ref()
+    let values_only = body
+        .options
+        .as_ref()
         .and_then(|o| o.values_only)
         .unwrap_or(false);
 
@@ -469,9 +515,7 @@ pub async fn social_keys_handler(
 
         match parsed {
             KeyPattern::Exact { account_id, key } => {
-                let entry = scylladb
-                    .get_kv(&account_id, contract, &key)
-                    .await?;
+                let entry = scylladb.get_kv(&account_id, contract, &key).await?;
 
                 if let Some(entry) = entry {
                     if !return_deleted && entry.value == "null" {
@@ -492,14 +536,25 @@ pub async fn social_keys_handler(
                     }
                 }
             }
-            KeyPattern::SingleWildcard { account_id, key_prefix } | KeyPattern::RecursiveWildcard { account_id, key_prefix } => {
+            KeyPattern::SingleWildcard {
+                account_id,
+                key_prefix,
+            }
+            | KeyPattern::RecursiveWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 // keys() only supports * (not **), but we handle both the same way for robustness
                 // keys() returns key structure — fetch all keys including deleted
                 // unless return_deleted is explicitly false AND values_only is set
                 let query = QueryParams {
                     predecessor_id: account_id.clone(),
                     current_account_id: contract.to_string(),
-                    key_prefix: if key_prefix.is_empty() { None } else { Some(key_prefix.clone()) },
+                    key_prefix: if key_prefix.is_empty() {
+                        None
+                    } else {
+                        Some(key_prefix.clone())
+                    },
                     exclude_null: Some(false),
                     limit: MAX_SOCIAL_RESULTS,
                     offset: 0,
@@ -509,7 +564,8 @@ pub async fn social_keys_handler(
                     after_key: None,
                 };
 
-                let (entries, _has_more, dropped) = scylladb.query_kv_with_pagination(&query).await?;
+                let (entries, _has_more, dropped) =
+                    scylladb.query_kv_with_pagination(&query).await?;
                 if dropped > 0 {
                     tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social keys");
                 }
@@ -531,7 +587,8 @@ pub async fn social_keys_handler(
                 let prefix_depth = key_prefix.matches('/').count();
                 let is_single = pattern.ends_with("/*") && !pattern.ends_with("/**");
 
-                let after_depth: Vec<&KvEntry> = entries.iter()
+                let after_depth: Vec<&KvEntry> = entries
+                    .iter()
                     .filter(|e| !is_single || e.key.matches('/').count() == prefix_depth)
                     .collect();
                 tracing::debug!(
@@ -543,7 +600,8 @@ pub async fn social_keys_handler(
                     "social_keys after depth filter"
                 );
 
-                let after_deleted: Vec<&&KvEntry> = after_depth.iter()
+                let after_deleted: Vec<&&KvEntry> = after_depth
+                    .iter()
                     .filter(|e| return_deleted || e.value != "null")
                     .collect();
                 tracing::debug!(
@@ -557,7 +615,8 @@ pub async fn social_keys_handler(
                 // Build set of parent prefixes for O(n) filtering instead of O(n²)
                 // A key like "a/b/c" contributes prefixes: "a/", "a/b/"
                 let parent_prefixes: std::collections::HashSet<String> = if values_only {
-                    entries.iter()
+                    entries
+                        .iter()
                         .flat_map(|e| {
                             let parts: Vec<_> = e.key.split('/').collect();
                             (0..parts.len().saturating_sub(1))
@@ -569,9 +628,12 @@ pub async fn social_keys_handler(
                 };
 
                 let before_values_only = after_deleted.len();
-                let filtered: Vec<&KvEntry> = after_deleted.into_iter()
+                let filtered: Vec<&KvEntry> = after_deleted
+                    .into_iter()
                     .filter(|e| {
-                        if !values_only { return true; }
+                        if !values_only {
+                            return true;
+                        }
                         // Keep entry if it's NOT a parent of any other entry
                         !parent_prefixes.contains(&format!("{}/", e.key))
                     })
@@ -586,7 +648,8 @@ pub async fn social_keys_handler(
                     "social_keys after values_only filter"
                 );
 
-                let items: Vec<(String, String)> = filtered.iter()
+                let items: Vec<(String, String)> = filtered
+                    .iter()
                     .map(|entry| {
                         let val = if return_block_height {
                             serde_json::json!(entry.block_height)
@@ -616,7 +679,8 @@ pub async fn social_keys_handler(
                     value_format: None,
                     after_account: None,
                 };
-                let (entries, _has_more, _truncated, dropped) = scylladb.query_writers(&by_key_params).await?;
+                let (entries, _has_more, _truncated, dropped) =
+                    scylladb.query_writers(&by_key_params).await?;
                 if dropped > 0 {
                     tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social keys (wildcard account)");
                 }
@@ -670,10 +734,14 @@ pub async fn social_index_handler(
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     if query.action.is_empty() {
-        return Err(ApiError::InvalidParameter("action cannot be empty".to_string()));
+        return Err(ApiError::InvalidParameter(
+            "action cannot be empty".to_string(),
+        ));
     }
     if query.key.is_empty() {
-        return Err(ApiError::InvalidParameter("key cannot be empty".to_string()));
+        return Err(ApiError::InvalidParameter(
+            "key cannot be empty".to_string(),
+        ));
     }
     validate_limit(query.limit)?;
     let contract = resolve_contract(&query.contract_id)?;
@@ -689,7 +757,8 @@ pub async fn social_index_handler(
         limit: query.limit,
         from: query.from,
         account_id: query.account_id.as_deref(),
-    }).await?;
+    })
+    .await?;
 
     let mut response = HttpResponse::Ok();
     if dropped > 0 {
@@ -738,7 +807,8 @@ pub async fn social_profile_handler(
         tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social profile");
     }
 
-    let items: Vec<(String, String)> = entries.into_iter()
+    let items: Vec<(String, String)> = entries
+        .into_iter()
         .map(|e| {
             let key = e.key.strip_prefix("profile/").unwrap_or(&e.key).to_string();
             (key, e.value)
@@ -769,7 +839,12 @@ pub async fn social_followers_handler(
     validate_limit(query.limit)?;
     let contract = resolve_contract(&query.contract_id)?;
 
-    validate_cursor_or_offset(query.after_account.as_deref(), "after_account", query.offset, validate_account_id)?;
+    validate_cursor_or_offset(
+        query.after_account.as_deref(),
+        "after_account",
+        query.offset,
+        validate_account_id,
+    )?;
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/followers");
 
@@ -822,7 +897,12 @@ pub async fn social_following_handler(
     validate_limit(query.limit)?;
     let contract = resolve_contract(&query.contract_id)?;
 
-    validate_cursor_or_offset(query.after_account.as_deref(), "after_account", query.offset, validate_account_id)?;
+    validate_cursor_or_offset(
+        query.after_account.as_deref(),
+        "after_account",
+        query.offset,
+        validate_account_id,
+    )?;
 
     tracing::info!(target: PROJECT_ID, account_id = %query.account_id, contract_id = %contract, "GET /v1/social/following");
 
@@ -838,12 +918,16 @@ pub async fn social_following_handler(
         fields: None,
         format: None,
         value_format: None,
-        after_key: query.after_account.as_ref().map(|a| format!("graph/follow/{}", a)),
+        after_key: query
+            .after_account
+            .as_ref()
+            .map(|a| format!("graph/follow/{}", a)),
     };
 
     let (entries, has_more, dropped) = scylladb.query_kv_with_pagination(&params).await?;
 
-    let accounts: Vec<String> = entries.into_iter()
+    let accounts: Vec<String> = entries
+        .into_iter()
         .filter_map(|e| e.key.strip_prefix("graph/follow/").map(|s| s.to_string()))
         .collect();
     let count = accounts.len();
@@ -919,16 +1003,19 @@ pub async fn social_account_feed_handler(
     };
 
     let posts: Vec<IndexEntry> = if include_replies {
-        let ((entries, _hm1, _tr1, dropped1), (comment_entries, _hm2, _tr2, dropped2)) = futures::future::try_join(
-            scylladb.get_kv_history(&history_params),
-            scylladb.get_kv_history(&comment_params),
-        ).await?;
+        let ((entries, _hm1, _tr1, dropped1), (comment_entries, _hm2, _tr2, dropped2)) =
+            futures::future::try_join(
+                scylladb.get_kv_history(&history_params),
+                scylladb.get_kv_history(&comment_params),
+            )
+            .await?;
         let total_dropped = dropped1 + dropped2;
         if total_dropped > 0 {
             tracing::warn!(target: PROJECT_ID, dropped = total_dropped, "Dropped rows in social feed");
         }
 
-        let mut combined: Vec<IndexEntry> = entries.into_iter()
+        let mut combined: Vec<IndexEntry> = entries
+            .into_iter()
             .chain(comment_entries.into_iter())
             .map(to_index_entry)
             .collect();
@@ -942,7 +1029,8 @@ pub async fn social_account_feed_handler(
         combined.truncate(query.limit);
         combined
     } else {
-        let (entries, _has_more, _truncated, dropped) = scylladb.get_kv_history(&history_params).await?;
+        let (entries, _has_more, _truncated, dropped) =
+            scylladb.get_kv_history(&history_params).await?;
         if dropped > 0 {
             tracing::warn!(target: PROJECT_ID, dropped, "Dropped rows in social feed");
         }
@@ -960,10 +1048,16 @@ fn merge_json(target: &mut serde_json::Map<String, serde_json::Value>, source: &
     }
 }
 
-fn merge_json_maps(target: &mut serde_json::Map<String, serde_json::Value>, source: &serde_json::Map<String, serde_json::Value>) {
+fn merge_json_maps(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Map<String, serde_json::Value>,
+) {
     for (key, value) in source {
         match (target.get_mut(key), value) {
-            (Some(serde_json::Value::Object(ref mut existing)), serde_json::Value::Object(incoming)) => {
+            (
+                Some(serde_json::Value::Object(ref mut existing)),
+                serde_json::Value::Object(incoming),
+            ) => {
                 merge_json_maps(existing, incoming);
             }
             _ => {
@@ -972,7 +1066,6 @@ fn merge_json_maps(target: &mut serde_json::Map<String, serde_json::Value>, sour
         }
     }
 }
-
 
 fn insert_block_height(
     obj: &mut serde_json::Map<String, serde_json::Value>,
@@ -1018,7 +1111,10 @@ mod tests {
     #[test]
     fn test_parse_recursive_wildcard() {
         match parse_social_key("alice.near/profile/**").unwrap() {
-            KeyPattern::RecursiveWildcard { account_id, key_prefix } => {
+            KeyPattern::RecursiveWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 assert_eq!(account_id, "alice.near");
                 assert_eq!(key_prefix, "profile/");
             }
@@ -1029,7 +1125,10 @@ mod tests {
     #[test]
     fn test_parse_single_wildcard() {
         match parse_social_key("alice.near/profile/*").unwrap() {
-            KeyPattern::SingleWildcard { account_id, key_prefix } => {
+            KeyPattern::SingleWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 assert_eq!(account_id, "alice.near");
                 assert_eq!(key_prefix, "profile/");
             }
@@ -1040,7 +1139,10 @@ mod tests {
     #[test]
     fn test_parse_bare_recursive_wildcard() {
         match parse_social_key("alice.near/**").unwrap() {
-            KeyPattern::RecursiveWildcard { account_id, key_prefix } => {
+            KeyPattern::RecursiveWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 assert_eq!(account_id, "alice.near");
                 assert_eq!(key_prefix, "");
             }
@@ -1051,7 +1153,10 @@ mod tests {
     #[test]
     fn test_parse_bare_single_wildcard() {
         match parse_social_key("alice.near/*").unwrap() {
-            KeyPattern::SingleWildcard { account_id, key_prefix } => {
+            KeyPattern::SingleWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 assert_eq!(account_id, "alice.near");
                 assert_eq!(key_prefix, "");
             }
@@ -1072,7 +1177,10 @@ mod tests {
     #[test]
     fn test_parse_account_only() {
         match parse_social_key("alice.near").unwrap() {
-            KeyPattern::RecursiveWildcard { account_id, key_prefix } => {
+            KeyPattern::RecursiveWildcard {
+                account_id,
+                key_prefix,
+            } => {
                 assert_eq!(account_id, "alice.near");
                 assert_eq!(key_prefix, "");
             }

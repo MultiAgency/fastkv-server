@@ -203,6 +203,7 @@ let currentHistoryEntries = [];
 
 const $ = (sel) => document.querySelector(sel);
 const contractInput = $('#contract-input');
+const accountInput = $('#account-input');
 const queryInput = $('#query-input');
 const exploreBtn = $('#explore-btn');
 const exploreForm = $('#explore-form');
@@ -240,30 +241,25 @@ const diffCopyBar = $('#diff-copy-bar');
 const MULTI_ACCOUNT_CAP = 200;
 const MULTI_ACCOUNT_CONCURRENCY = 5;
 
-async function explore(pattern) {
-  const q = pattern || queryInput.value || `${currentAccount}/profile/**`;
+async function explore(keyPath) {
+  currentAccount = accountInput.value || 'root.near';
   contractId = contractInput.value || 'contextual.near';
+  multiAccountMode = allAccountsCheck && allAccountsCheck.checked;
+
+  const keyPrefix = (keyPath || queryInput.value || 'profile/**').replace(/\/?\*+$/, '') || undefined;
+
   loading = true;
   exploreBtn.disabled = true;
   exploreBtn.textContent = '...';
   hideError();
   hideDetail();
 
-  // Detect cross-account pattern (starts with */...)
-  multiAccountMode = q.startsWith('*/');
-
-  // Parse pattern to extract accountId + key prefix
-  const stripped = q.replace(/\/?\*+$/, '');
-  const parts = stripped.split('/');
-  const acctId = parts[0];
-  const keyPrefix = parts.slice(1).join('/') || undefined;
-
   try {
     if (!multiAccountMode) {
       // ── Single-account: KV only, no fallback ──
-      const tree = await kvQueryTree(acctId, contractId, keyPrefix);
+      const tree = await kvQueryTree(currentAccount, contractId, keyPrefix);
       if (tree && Object.keys(tree).length > 0) {
-        treeData = { [acctId]: tree };
+        treeData = { [currentAccount]: tree };
         rawData = treeData;
       } else {
         showError('No data (KV)');
@@ -370,17 +366,16 @@ function renderBreadcrumb() {
 }
 
 function navigateBreadcrumb(segments) {
+  setAccount(segments[0]);
   if (segments.length === 1) {
-    currentAccount = segments[0];
     queryInput.value = '';
     breadcrumb = [currentAccount];
-    explore(`${currentAccount}/profile/**`);
+    explore('profile/**');
   } else {
-    const path = segments.slice(1).join('/');
-    const pattern = `${segments[0]}/${path}/**`;
-    queryInput.value = pattern;
+    const keyPath = segments.slice(1).join('/');
+    queryInput.value = `${keyPath}/**`;
     breadcrumb = segments;
-    explore(pattern);
+    explore(`${keyPath}/**`);
   }
 }
 
@@ -758,12 +753,12 @@ async function loadFeed(accountId) {
 }
 
 function feedNavigate(accountId, key) {
-  currentAccount = accountId;
+  setAccount(accountId);
   const parts = key.split('/');
   breadcrumb = [accountId, ...parts];
-  queryInput.value = `${accountId}/${key}/**`;
+  queryInput.value = `${key}/**`;
   setViewMode('tree');
-  explore(`${accountId}/${key}/**`);
+  explore(`${key}/**`);
 }
 
 function timeAgo(timestampMs) {
@@ -777,11 +772,10 @@ function timeAgo(timestampMs) {
 // ── Navigation ──────────────────────────────────────────────
 
 function navigateToAccount(accountId) {
-  currentAccount = accountId;
+  setAccount(accountId);
   queryInput.value = '';
   breadcrumb = [currentAccount];
-  allAccountsCheck.checked = false;
-  explore(`${currentAccount}/profile/**`);
+  explore('profile/**');
 }
 
 function handleQuickPath(path) {
@@ -791,10 +785,10 @@ function handleQuickPath(path) {
     loadFeed(acct);
     return;
   }
-  const pattern = `${currentAccount}/${path}/**`;
-  queryInput.value = pattern;
+  queryInput.value = `${path}/**`;
+  currentAccount = accountInput.value || 'root.near';
   breadcrumb = [currentAccount, path];
-  explore(pattern);
+  explore(`${path}/**`);
 }
 
 // ── View mode ───────────────────────────────────────────────
@@ -838,18 +832,14 @@ function render() {
 
 exploreForm.onsubmit = (e) => {
   e.preventDefault();
-  let q = queryInput.value.trim();
-
-  // If "all accounts" is checked, prefix with */ if not already
-  if (allAccountsCheck && allAccountsCheck.checked && !q.startsWith('*/')) {
-    q = `*/${q}`;
-  }
-
+  const q = queryInput.value.trim();
+  currentAccount = accountInput.value || 'root.near';
   if (q) {
-    const parts = q.replace(/\/?\*+$/, '').split('/');
-    breadcrumb = parts;
+    const keyParts = q.replace(/\/?\*+$/, '').split('/');
+    breadcrumb = [currentAccount, ...keyParts];
     explore(q);
   } else {
+    breadcrumb = [currentAccount];
     explore();
   }
 };
@@ -868,6 +858,22 @@ quickPaths.onclick = (e) => {
 contractInput.onchange = () => {
   contractId = contractInput.value;
 };
+
+accountInput.onchange = () => {
+  currentAccount = accountInput.value;
+};
+
+if (allAccountsCheck) {
+  allAccountsCheck.onchange = () => {
+    accountInput.disabled = allAccountsCheck.checked;
+  };
+}
+
+function setAccount(accountId) {
+  currentAccount = accountId;
+  if (accountInput) { accountInput.value = accountId; accountInput.disabled = false; }
+  if (allAccountsCheck) allAccountsCheck.checked = false;
+}
 
 // Diff button handler
 if (diffBtn) {
@@ -916,5 +922,6 @@ if (diffBtn) {
 
 // ── Init ────────────────────────────────────────────────────
 
+currentAccount = accountInput.value || 'root.near';
 breadcrumb = [currentAccount];
-explore(`${currentAccount}/profile/**`);
+explore('profile/**');

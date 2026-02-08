@@ -1,144 +1,234 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NEAR Garden</title>
-<meta name="description" content="Explore and plant on-chain key-value data on NEAR Protocol. No API key required.">
-<meta property="og:title" content="NEAR Garden">
-<meta property="og:description" content="Explore and plant on-chain key-value data on NEAR Protocol. No API key required.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://fastdata.up.railway.app">
-<meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="NEAR Garden">
-<meta name="twitter:description" content="Explore and plant on-chain key-value data on NEAR Protocol. No API key required.">
-<link rel="canonical" href="https://fastdata.up.railway.app">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127793;</text></svg>">
-<link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<header>
-  <div class="header-left">
-    <h1 class="logo">NEAR Garden</h1>
-    <span class="tag">v1 &middot; NEAR Protocol</span>
-  </div>
-  <nav>
-    <a href="/docs" class="nav-link">API Docs</a>
-    <span id="wallet-area" class="wallet-area"></span>
-  </nav>
-</header>
-
-<main>
-  <div class="controls">
-    <div class="contract-row">
-      <label for="contract-input" class="label">contract</label>
-      <input id="contract-input" type="text" value="contextual.near" spellcheck="false">
-    </div>
-    <form id="explore-form" class="search-row">
-      <input id="query-input" type="text" placeholder="root.near/profile/**" spellcheck="false">
-      <label class="all-accounts-toggle">
-        <input type="checkbox" id="all-accounts-check"> <span>all accounts</span>
-      </label>
-      <button type="submit" id="explore-btn">explore_</button>
-    </form>
-    <div class="quick-paths" id="quick-paths">
-      <button type="button" data-path="profile">profile</button>
-      <button type="button" data-path="graph">graph</button>
-      <button type="button" data-path="index">index</button>
-      <button type="button" data-path="recent" id="quick-recent">recent</button>
-    </div>
-  </div>
-
-  <div id="breadcrumb" class="breadcrumb"></div>
-
-  <div class="view-toggle">
-    <button type="button" id="view-tree" class="active" aria-pressed="true">tree</button>
-    <button type="button" id="view-json" aria-pressed="false">json</button>
-    <button type="button" id="view-plant" aria-pressed="false" hidden>plant</button>
-  </div>
-
-  <div id="error-bar" class="error-bar" hidden>
-    <span id="error-msg"></span>
-    <button type="button" id="retry-btn">retry_</button>
-  </div>
-
-  <div id="content" class="content">
-    <div id="tree-panel" class="panel tree-panel">
-      <div id="tree" role="tree"></div>
-    </div>
-    <div id="detail-panel" class="panel detail-panel" hidden>
-      <div id="detail-path" class="detail-path"></div>
-      <pre id="detail-value" class="detail-value"></pre>
-      <div id="detail-meta" class="detail-meta"></div>
-    </div>
-    <div id="history-panel" class="panel history-panel" hidden>
-      <div class="history-title">history</div>
-      <div id="history-list" class="history-list"></div>
-      <div class="history-copy-bar copy-bar"></div>
-      <div class="diff-controls">
-        <select id="diff-select-a" class="diff-select"></select>
-        <span class="diff-vs">vs</span>
-        <select id="diff-select-b" class="diff-select"></select>
-        <button type="button" id="diff-btn">diff</button>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>NEAR Garden</title>
+    <meta
+      name="description"
+      content="Explore and plant on-chain key-value data on NEAR Protocol. No API key required."
+    />
+    <meta property="og:title" content="NEAR Garden" />
+    <meta
+      property="og:description"
+      content="Explore and plant on-chain key-value data on NEAR Protocol. No API key required."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://fastdata.up.railway.app" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="NEAR Garden" />
+    <meta
+      name="twitter:description"
+      content="Explore and plant on-chain key-value data on NEAR Protocol. No API key required."
+    />
+    <link rel="canonical" href="https://fastdata.up.railway.app" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127793;</text></svg>"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="header-left">
+        <h1 class="logo">NEAR Garden</h1>
+        <span class="tag">Powered by FastNEAR</span>
       </div>
-      <pre id="diff-result" class="diff-result"></pre>
-      <div id="diff-copy-bar" class="copy-bar"></div>
-    </div>
-  </div>
+      <nav>
+        <a href="/docs" class="nav-link">API Docs</a>
+        <a
+          href="https://github.com/MultiAgency/fastkv-server"
+          class="nav-link"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="GitHub"
+          ><svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
+            /></svg
+        ></a>
+        <span id="wallet-area" class="wallet-area"></span>
+      </nav>
+    </header>
 
-  <div id="json-panel" class="panel json-panel" hidden>
-    <pre id="json-view"></pre>
-  </div>
+    <main>
+      <div class="controls">
+        <div class="contract-row">
+          <label for="contract-input" class="label">contract</label>
+          <input
+            id="contract-input"
+            type="text"
+            value="contextual.near"
+            spellcheck="false"
+          />
+        </div>
+        <div class="contract-row">
+          <label for="account-input" class="label">account</label>
+          <input
+            id="account-input"
+            type="text"
+            value="root.near"
+            spellcheck="false"
+          />
+        </div>
+        <form id="explore-form" class="search-row">
+          <input
+            id="query-input"
+            type="text"
+            placeholder="profile/**"
+            spellcheck="false"
+          />
+          <label class="all-accounts-toggle">
+            <input type="checkbox" id="all-accounts-check" />
+            <span>all accounts</span>
+          </label>
+          <button type="submit" id="explore-btn">explore_</button>
+        </form>
+        <div class="quick-paths" id="quick-paths">
+          <button type="button" data-path="profile">profile</button>
+          <button type="button" data-path="graph">graph</button>
+          <button type="button" data-path="index">index</button>
+          <button type="button" data-path="recent" id="quick-recent">
+            recent
+          </button>
+        </div>
+      </div>
 
-  <!-- Plant panel -->
-  <div id="plant-panel" class="panel plant-panel" hidden>
-    <div class="plant-templates">
-      <span class="plant-label">templates</span>
-      <button type="button" onclick="applyTemplate('profile')">profile</button>
-      <button type="button" onclick="applyTemplate('post')">post</button>
-      <button type="button" onclick="applyTemplate('widget')">widget</button>
-      <button type="button" onclick="applyTemplate('raw')">raw</button>
-    </div>
-    <div class="plant-field">
-      <label for="plant-key" class="plant-label">key path</label>
-      <input id="plant-key" type="text" placeholder="recipes/carbonara" spellcheck="false" oninput="updatePlantPreview()">
-    </div>
-    <div class="plant-field">
-      <label for="plant-value" class="plant-label">value (JSON)</label>
-      <textarea id="plant-value" rows="8" spellcheck="false" placeholder='{ "ingredients": ["pasta", "eggs"] }'></textarea>
-    </div>
-    <div id="plant-preview" class="plant-preview"></div>
-    <button type="button" id="plant-btn" class="plant-btn" onclick="plantData()">plant_</button>
-    <div id="plant-status" class="plant-status"></div>
-  </div>
+      <div id="breadcrumb" class="breadcrumb"></div>
 
-  <!-- Feed panel (timeline) -->
-  <div id="feed-panel" class="panel feed-panel" hidden>
-    <div id="feed-list" class="feed-list"></div>
-  </div>
+      <div class="view-toggle">
+        <button type="button" id="view-tree" class="active" aria-pressed="true">
+          tree
+        </button>
+        <button type="button" id="view-json" aria-pressed="false">json</button>
+        <button type="button" id="view-plant" aria-pressed="false" hidden>
+          plant
+        </button>
+      </div>
 
-  <!-- API Inspector -->
-  <div id="api-inspector" class="api-inspector" hidden>
-    <div class="inspector-toggle" role="button" tabindex="0" onclick="toggleInspector()">
-      <span class="inspector-arrow" id="inspector-arrow">&#9656;</span>
-      <span id="inspector-summary">API Call</span>
-      <button type="button" class="inspector-copy" id="inspector-copy" onclick="event.stopPropagation(); copyAsCurl()">copy curl</button>
-    </div>
-    <div id="inspector-detail" class="inspector-detail" hidden>
-      <pre id="inspector-body"></pre>
-    </div>
-  </div>
-</main>
+      <div id="error-bar" class="error-bar" hidden>
+        <span id="error-msg"></span>
+        <button type="button" id="retry-btn">retry_</button>
+      </div>
 
-<footer>
-  <p>NEAR Garden is a demo app built using <a href="https://hackmd.io/@fastnear/__fastdata">FastData</a>. Powered by <a href="https://fastnear.com">FastNear</a>.</p>
-</footer>
+      <div id="content" class="content">
+        <div id="tree-panel" class="panel tree-panel">
+          <div id="tree" role="tree"></div>
+        </div>
+        <div id="detail-panel" class="panel detail-panel" hidden>
+          <div id="detail-path" class="detail-path"></div>
+          <pre id="detail-value" class="detail-value"></pre>
+          <div id="detail-meta" class="detail-meta"></div>
+        </div>
+        <div id="history-panel" class="panel history-panel" hidden>
+          <div class="history-title">history</div>
+          <div id="history-list" class="history-list"></div>
+          <div class="history-copy-bar copy-bar"></div>
+          <div class="diff-controls">
+            <select id="diff-select-a" class="diff-select"></select>
+            <span class="diff-vs">vs</span>
+            <select id="diff-select-b" class="diff-select"></select>
+            <button type="button" id="diff-btn">diff</button>
+          </div>
+          <pre id="diff-result" class="diff-result"></pre>
+          <div id="diff-copy-bar" class="copy-bar"></div>
+        </div>
+      </div>
 
-<script src="https://cdn.jsdelivr.net/npm/near-api-js@0.44.2/dist/near-api-js.min.js"></script>
-<script src="/app.js"></script>
-<script src="/wallet.js"></script>
-<script>
-  initNear().catch(e => console.warn('Wallet init failed:', e));
-</script>
-</body>
+      <div id="json-panel" class="panel json-panel" hidden>
+        <pre id="json-view"></pre>
+      </div>
+
+      <!-- Plant panel -->
+      <div id="plant-panel" class="panel plant-panel" hidden>
+        <div class="plant-templates">
+          <span class="plant-label">templates</span>
+          <button type="button" onclick="applyTemplate('profile')">
+            profile
+          </button>
+          <button type="button" onclick="applyTemplate('post')">post</button>
+          <button type="button" onclick="applyTemplate('widget')">
+            widget
+          </button>
+          <button type="button" onclick="applyTemplate('raw')">raw</button>
+        </div>
+        <div class="plant-field">
+          <label for="plant-key" class="plant-label">key path</label>
+          <input
+            id="plant-key"
+            type="text"
+            placeholder="recipes/carbonara"
+            spellcheck="false"
+            oninput="updatePlantPreview()"
+          />
+        </div>
+        <div class="plant-field">
+          <label for="plant-value" class="plant-label">value (JSON)</label>
+          <textarea
+            id="plant-value"
+            rows="8"
+            spellcheck="false"
+            placeholder='{ "ingredients": ["pasta", "eggs"] }'
+          ></textarea>
+        </div>
+        <div id="plant-preview" class="plant-preview"></div>
+        <button
+          type="button"
+          id="plant-btn"
+          class="plant-btn"
+          onclick="plantData()"
+        >
+          plant_
+        </button>
+        <div id="plant-status" class="plant-status"></div>
+      </div>
+
+      <!-- Feed panel (timeline) -->
+      <div id="feed-panel" class="panel feed-panel" hidden>
+        <div id="feed-list" class="feed-list"></div>
+      </div>
+
+      <!-- API Inspector -->
+      <div id="api-inspector" class="api-inspector" hidden>
+        <div
+          class="inspector-toggle"
+          role="button"
+          tabindex="0"
+          onclick="toggleInspector()"
+        >
+          <span class="inspector-arrow" id="inspector-arrow">&#9656;</span>
+          <span id="inspector-summary">API Call</span>
+          <button
+            type="button"
+            class="inspector-copy"
+            id="inspector-copy"
+            onclick="
+              event.stopPropagation();
+              copyAsCurl();
+            "
+          >
+            copy curl
+          </button>
+        </div>
+        <div id="inspector-detail" class="inspector-detail" hidden>
+          <pre id="inspector-body"></pre>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <p>
+        NEAR Garden is a query API for on-chain key-value storage, built using
+        <a href="https://hackmd.io/@fastnear/__fastdata">FastData</a>. Powered
+        by <a href="https://github.com/fastnear/fastdata-indexer">FastNEAR</a>.
+      </p>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/near-api-js@0.44.2/dist/near-api-js.min.js"></script>
+    <script src="/app.js"></script>
+    <script src="/wallet.js"></script>
+    <script>
+      initNear().catch((e) => console.warn("Wallet init failed:", e));
+    </script>
+  </body>
 </html>

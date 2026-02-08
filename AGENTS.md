@@ -101,7 +101,7 @@ These are load-bearing. Breaking any one breaks client pagination.
 1. **Overfetch by 1.** Query `limit + 1` rows. Got `limit + 1` back → `has_more = true`, then truncate to `limit`.
 2. **Always emit `next_cursor`.** Set from the last item in the result, even when `has_more == false`. Clients use `next_cursor` as the resume token.
 3. **`truncated` only from scan caps.** `truncated: true` only when a scan/dedup cap was hit (10k rows for history/timeline, 100k unique accounts for accounts-by-contract). Writers streams without a cap — `truncated` is always false there. Never set `truncated` from normal limit+1 pagination.
-4. **`has_more` truthfulness.** Authoritative for cursor+limit endpoints. Best-effort when `truncated == true`.
+4. **`has_more` truthfulness.** Authoritative for cursor+limit endpoints. Best-effort when `truncated == true`. If `truncated` is true, treat `has_more` as unreliable; use `next_cursor` to resume.
 5. **Cursor/offset mutual exclusion.** Both `after_*` and `offset > 0` → reject with HTTP 400.
 6. **No pagination fields outside `meta`.** Never add `has_more`, `next_cursor`, or `truncated` to the top level.
 7. **`dropped_rows` from deser errors.** `meta.dropped_rows` reports rows skipped due to deserialization failures. Omitted when zero (`Option<u32>`, `skip_serializing_if`). For social endpoints, use `X-Dropped-Rows` header instead (no `meta` envelope). Never expose error details — just the count.
@@ -144,6 +144,7 @@ Do not invent ad-hoc `serde_json::json!({...})` shapes for new endpoints. Use `P
 - `/v1/kv/query` without `key_prefix` — full partition scan. **Prefer `key_prefix` to narrow.**
 - `/v1/kv/timeline` — full partition scan + in-memory filter/sort, capped at 10k rows. **Narrow with `from_block`/`to_block`.**
 - `/v1/kv/accounts` without `key` — full partition scan + HashSet dedup, capped at 100k unique. **Prefer `key` filter.**
+- `/v1/kv/accounts` without `contractId` (`scan=1`) — reads `all_accounts` table (no dedup needed, TOKEN-based cursor). Throttled 1 req/sec/IP, limit clamped to 1,000. **Admin/dev only.**
 - `/v1/kv/writers` — streams entire reverse table partition (unbounded, no scan cap). **Use cursor pagination with tight `limit`.**
 - `/v1/kv/edges/count` — `COUNT(*)` scans entire partition. **No mitigation; avoid in hot loops.**
 
@@ -156,8 +157,9 @@ Do not invent ad-hoc `serde_json::json!({...})` shapes for new endpoints. Use `P
 | `MAX_SOCIAL_RESULTS` | 1,000 | Per-pattern cap in social handlers. Controls `X-Results-Truncated`. |
 | `MAX_OFFSET` | 100,000 | Hard ceiling on offset pagination. |
 | `MAX_BATCH_KEYS` | 100 | Concurrent batch lookups (buffered 10 at a time). |
+| `MAX_SCAN_LIMIT` | 1,000 | Max `limit` for `/v1/kv/accounts` without `contractId` (`scan=1`). |
 
-Full constant list in models.rs:1–18.
+Full constant list in models.rs:1–20.
 
 ## Testing Contract
 
