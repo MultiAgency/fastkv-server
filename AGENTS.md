@@ -113,12 +113,12 @@ using `next_cursor` but completion is unknown.
 
 ## Response Envelopes
 
-| Kind | Shape | Used by |
-|---|---|---|
-| Paginated list | `PaginatedResponse<T>` → `{ data: T[], meta }` | All KV list endpoints |
-| Singleton | `DataResponse<T>` → `{ data: T }` | get, batch, diff, edges/count |
-| Infra | Flat JSON, no envelope | /health, /v1/status |
-| Social get/keys | Raw nested JSON (SocialDB compat) | /social/get, /social/keys |
+| Kind            | Shape                                          | Used by                       |
+| --------------- | ---------------------------------------------- | ----------------------------- |
+| Paginated list  | `PaginatedResponse<T>` → `{ data: T[], meta }` | All KV list endpoints         |
+| Singleton       | `DataResponse<T>` → `{ data: T }`              | get, batch, diff, edges/count |
+| Infra           | Flat JSON, no envelope                         | /health, /v1/status           |
+| Social get/keys | Raw nested JSON (SocialDB compat)              | /social/get, /social/keys     |
 
 Do not invent ad-hoc `serde_json::json!({...})` shapes for new endpoints. Use `PaginatedResponse<T>` or `DataResponse<T>`.
 
@@ -150,14 +150,14 @@ Do not invent ad-hoc `serde_json::json!({...})` shapes for new endpoints. Use `P
 
 ## Hard Limits (Do Not Change Casually)
 
-| Constant | Value | Why it matters |
-|---|---|---|
-| `MAX_HISTORY_SCAN` | 10,000 | Row cap for history/timeline. Changing affects `truncated` truthfulness and query cost. |
-| `MAX_DEDUP_SCAN` | 100,000 | Unique-value cap for `query_accounts_by_contract` dedup HashSet. Memory-bound. |
-| `MAX_SOCIAL_RESULTS` | 1,000 | Per-pattern cap in social handlers. Controls `X-Results-Truncated`. |
-| `MAX_OFFSET` | 100,000 | Hard ceiling on offset pagination. |
-| `MAX_BATCH_KEYS` | 100 | Concurrent batch lookups (buffered 10 at a time). |
-| `MAX_SCAN_LIMIT` | 1,000 | Max `limit` for `/v1/kv/accounts` without `contractId` (`scan=1`). |
+| Constant             | Value   | Why it matters                                                                          |
+| -------------------- | ------- | --------------------------------------------------------------------------------------- |
+| `MAX_HISTORY_SCAN`   | 10,000  | Row cap for history/timeline. Changing affects `truncated` truthfulness and query cost. |
+| `MAX_DEDUP_SCAN`     | 100,000 | Unique-value cap for `query_accounts_by_contract` dedup HashSet. Memory-bound.          |
+| `MAX_SOCIAL_RESULTS` | 1,000   | Per-pattern cap in social handlers. Controls `X-Results-Truncated`.                     |
+| `MAX_OFFSET`         | 100,000 | Hard ceiling on offset pagination.                                                      |
+| `MAX_BATCH_KEYS`     | 100     | Concurrent batch lookups (buffered 10 at a time).                                       |
+| `MAX_SCAN_LIMIT`     | 1,000   | Max `limit` for `/v1/kv/accounts` without `contractId` (`scan=1`).                      |
 
 Full constant list in models.rs:1–20.
 
@@ -182,7 +182,7 @@ Full constant list in models.rs:1–20.
 ## Pointers
 
 - **REFERENCE.md** — Endpoint params, TS interfaces, env vars, cost ratings, prepared statement table
-- **https://fastdata.up.railway.app/docs** — OpenAPI spec via Scalar UI (auto-generated from utoipa annotations in main.rs)
+- **https://near.garden/docs** — OpenAPI spec via Scalar UI (auto-generated from utoipa annotations in main.rs)
 - **models.rs:1–18** — All constants
 - **scylladb.rs `collect_page()`** — Reusable paginated stream helper (overfetch + scan-cap modes). 8 unit tests.
 - **scylladb.rs:131–393** — ScyllaDb struct + all prepared statement initialization

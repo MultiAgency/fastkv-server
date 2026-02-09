@@ -2,7 +2,7 @@
 
 API for querying NEAR blockchain FastData key-value stores (`__fastdata_kv`) stored in ScyllaDB.
 
-**Live:** https://fastdata.up.railway.app
+**Live:** https://near.garden
 
 ## Supported Use Cases
 
@@ -33,6 +33,7 @@ Verifies database connectivity and returns the current status.
 **Responses:**
 
 - **200 OK** - Database is reachable:
+
   ```json
   { "status": "ok" }
   ```
@@ -44,7 +45,7 @@ Verifies database connectivity and returns the current status.
 
 ### API Documentation
 
-Interactive OpenAPI 3.0 documentation available at [https://fastdata.up.railway.app/docs](https://fastdata.up.railway.app/docs)
+Interactive OpenAPI 3.0 documentation available at [https://near.garden/docs](https://near.garden/docs)
 
 ### Get Single Entry
 
@@ -52,11 +53,11 @@ Interactive OpenAPI 3.0 documentation available at [https://fastdata.up.railway.
 GET /v1/kv/get?predecessor_id={account}&current_account_id={contract}&key={key}
 ```
 
-| Parameter            | Description                                                  |
-| -------------------- | ------------------------------------------------------------ |
-| `predecessor_id`     | The account that wrote the data                              |
-| `current_account_id` | The contract called (e.g., `social.near`)                    |
-| `key`                | The specific key with which to retrieve its respective value |
+| Parameter            | Description                                                            |
+| -------------------- | ---------------------------------------------------------------------- |
+| `predecessor_id`     | The account that wrote the data                                        |
+| `current_account_id` | The contract called (e.g., `social.near`)                              |
+| `key`                | The specific key with which to retrieve its respective value           |
 | `fields`             | Optional: Comma-separated list of fields to return (e.g., `key,value`) |
 
 Returns a single entry object if found, or `null` if not found.
@@ -64,7 +65,7 @@ Returns a single entry object if found, or `null` if not found.
 **Field Selection Example:**
 
 ```bash
-curl "https://fastdata.up.railway.app/v1/kv/get?predecessor_id=james.near&current_account_id=social.near&key=profile/name&fields=key,value"
+curl "https://near.garden/v1/kv/get?predecessor_id=james.near&current_account_id=social.near&key=profile/name&fields=key,value"
 ```
 
 **Response with field selection:**
@@ -86,15 +87,15 @@ GET /v1/kv/history?predecessor_id={account}&current_account_id={contract}&key={k
 
 Retrieves the full history of values for a specific key from the `s_kv` table.
 
-| Parameter            | Description                                                              |
-| -------------------- | ------------------------------------------------------------------------ |
-| `predecessor_id`     | The account that wrote the data                                          |
-| `current_account_id` | The contract called (e.g., `social.near`)                                |
-| `key`                | The specific key to retrieve history for                                 |
-| `limit`              | Max results to return (default: `100`, range: `1-1000`)                  |
-| `order`              | Sort order by block height: `asc` or `desc` (default: `desc`)            |
-| `from_block`         | Optional: Filter entries with block_height >= this value                 |
-| `to_block`           | Optional: Filter entries with block_height <= this value                 |
+| Parameter            | Description                                                                     |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `predecessor_id`     | The account that wrote the data                                                 |
+| `current_account_id` | The contract called (e.g., `social.near`)                                       |
+| `key`                | The specific key to retrieve history for                                        |
+| `limit`              | Max results to return (default: `100`, range: `1-1000`)                         |
+| `order`              | Sort order by block height: `asc` or `desc` (default: `desc`)                   |
+| `from_block`         | Optional: Filter entries with block_height >= this value                        |
+| `to_block`           | Optional: Filter entries with block_height <= this value                        |
 | `fields`             | Optional: Comma-separated list of fields to return (e.g., `value,block_height`) |
 
 Returns an array of entries showing how the value changed over time, with the most recent value first (when `order=desc`).
@@ -102,7 +103,7 @@ Returns an array of entries showing how the value changed over time, with the mo
 **Example - Get profile name history:**
 
 ```bash
-curl "https://fastdata.up.railway.app/v1/kv/history?predecessor_id=james.near&current_account_id=social.near&key=profile/name&limit=10"
+curl "https://near.garden/v1/kv/history?predecessor_id=james.near&current_account_id=social.near&key=profile/name&limit=10"
 ```
 
 **Response:**
@@ -145,13 +146,14 @@ curl "https://fastdata.up.railway.app/v1/kv/history?predecessor_id=james.near&cu
 ```
 
 **Use Cases:**
+
 - Track how a profile evolved over time
 - Audit trail for social graph changes
 - Time-series analysis of on-chain data
 
 ### All Endpoints
 
-Full interactive documentation for all 16 endpoints (8 KV + health + 7 Social) is available at [/docs](https://fastdata.up.railway.app/docs). The most common endpoints are documented below.
+Full interactive documentation for all 16 endpoints (8 KV + health + 7 Social) is available at [/docs](https://near.garden/docs). The most common endpoints are documented below.
 
 ### Query Multiple Entries
 
@@ -174,7 +176,7 @@ GET /v1/kv/query?predecessor_id={account}&current_account_id={contract}&key_pref
 **Example - Get all follows (SocialDB tree structure):**
 
 ```bash
-curl "https://fastdata.up.railway.app/v1/kv/query?predecessor_id=james.near&current_account_id=social.near&key_prefix=graph/follow/&exclude_null=true"
+curl "https://near.garden/v1/kv/query?predecessor_id=james.near&current_account_id=social.near&key_prefix=graph/follow/&exclude_null=true"
 ```
 
 This returns all keys under the `graph/follow/` tree:
@@ -186,7 +188,7 @@ This returns all keys under the `graph/follow/` tree:
 **Example - Get entire profile tree:**
 
 ```bash
-curl "https://fastdata.up.railway.app/v1/kv/query?predecessor_id=alice.near&current_account_id=social.near&key_prefix=profile/&exclude_null=true"
+curl "https://near.garden/v1/kv/query?predecessor_id=alice.near&current_account_id=social.near&key_prefix=profile/&exclude_null=true"
 ```
 
 Returns all profile keys:
@@ -220,7 +222,7 @@ Results are automatically deduplicated by `predecessor_id`, keeping only the mos
 **Example - Get followers:**
 
 ```bash
-curl "https://fastdata.up.railway.app/v1/kv/reverse?current_account_id=social.near&key=graph/follow/james.near&exclude_null=true"
+curl "https://near.garden/v1/kv/reverse?current_account_id=social.near&key=graph/follow/james.near&exclude_null=true"
 ```
 
 ## Response Format
